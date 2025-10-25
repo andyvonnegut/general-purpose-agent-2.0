@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Application specific
+Logs/
+Testing/
+Results/
+Temp/
+Configuration_Files/API_Keys.csv
+
+# Data files (optional - uncomment if you want to ignore all data)
+# Context/Record_Context/*.csv
+# Context/Record_Context/*.xlsx
+# Context/Question_Context/*.csv
+# Context/Question_Context/*.xlsx
