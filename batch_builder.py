@@ -1,6 +1,6 @@
 import json
 import pandas as pd
-from unified_logger import get_logger
+from unified_logger import get_logger, LogLevel
 
 def build_batches(dataframes_dict, selected_job_name):
     """
@@ -20,13 +20,13 @@ def build_batches(dataframes_dict, selected_job_name):
         # Retrieve necessary DataFrames from the dictionary
         gpa_job_config_df = dataframes_dict.get('GPA_Job_Configuration')
         if gpa_job_config_df is None:
-            logger.log_error("GPA_Job_Configuration file is missing from dataframes_dict.", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, "GPA_Job_Configuration file is missing from dataframes_dict.", source_file="batch_builder.py")
             return pd.DataFrame()
 
         # Retrieve the selected job configuration
         selected_job = gpa_job_config_df[gpa_job_config_df['Job_Name'] == selected_job_name]
         if selected_job.empty:
-            logger.log_error(f"No configuration found for job: {selected_job_name}", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, f"No configuration found for job: {selected_job_name}", source_file="batch_builder.py")
             return pd.DataFrame()
 
         # Get relevant fields from the job configuration
@@ -37,7 +37,7 @@ def build_batches(dataframes_dict, selected_job_name):
         record_context_dfs = [df for df_name, df in dataframes_dict.items() if df_name.startswith('Record_Context_')]
 
         if not record_context_dfs:
-            logger.log_error("No record context dataframes found.", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, "No record context dataframes found.", source_file="batch_builder.py")
             return pd.DataFrame()
 
         # Collect all question context (we'll send ALL of it with each record)
@@ -78,13 +78,13 @@ def build_batches(dataframes_dict, selected_job_name):
         # Convert to DataFrame
         batches_df = pd.DataFrame(batch_rows)
 
-        logger.log("INFO", f"Built {len(batches_df)} batches (one per record)")
+        logger.log(LogLevel.INFO, f"Built {len(batches_df)} batches (one per record)")
         print(f"Built {len(batches_df)} batches (one per record)")
 
         return batches_df
 
     except Exception as e:
-        logger.log_error(f"Error in batch builder: {str(e)}", source_file="batch_builder.py")
+        logger.log(LogLevel.ERROR, f"Error in batch builder: {str(e)}", source_file="batch_builder.py")
         return pd.DataFrame()
 
 def create_response_format(dataframes_dict, selected_job_name):
@@ -105,13 +105,13 @@ def create_response_format(dataframes_dict, selected_job_name):
         # Retrieve the GPA Job Configuration DataFrame
         gpa_job_config_df = dataframes_dict.get('GPA_Job_Configuration')
         if gpa_job_config_df is None:
-            logger.log_error("GPA_Job_Configuration file is missing from dataframes_dict.", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, "GPA_Job_Configuration file is missing from dataframes_dict.", source_file="batch_builder.py")
             return {}
 
         # Get the tool description for the selected job
         selected_job = gpa_job_config_df[gpa_job_config_df['Job_Name'] == selected_job_name]
         if selected_job.empty:
-            logger.log_error(f"No configuration found for job: {selected_job_name}", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, f"No configuration found for job: {selected_job_name}", source_file="batch_builder.py")
             return {}
 
         tool_description = selected_job['Tool_Descriptions'].values[0]
@@ -119,7 +119,7 @@ def create_response_format(dataframes_dict, selected_job_name):
         # Retrieve the GPA Questions DataFrame
         gpa_questions_df = dataframes_dict.get('GPA_Questions')
         if gpa_questions_df is None:
-            logger.log_error("GPA_Questions file is missing from dataframes_dict.", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, "GPA_Questions file is missing from dataframes_dict.", source_file="batch_builder.py")
             return {}
 
         # Filter questions based on the job name
@@ -178,7 +178,7 @@ def create_response_format(dataframes_dict, selected_job_name):
         return response_format
 
     except Exception as e:
-        logger.log_error(f"Error creating response format: {str(e)}", source_file="batch_builder.py")
+        logger.log(LogLevel.ERROR, f"Error creating response format: {str(e)}", source_file="batch_builder.py")
         return {}
 
 def get_enum_values(enum_file_name, dataframes_dict):
@@ -203,7 +203,7 @@ def get_enum_values(enum_file_name, dataframes_dict):
                 break
 
         if question_context_df is None:
-            logger.log_error(f"No matching dataframe found for enum file: {enum_file_name}", source_file="batch_builder.py")
+            logger.log(LogLevel.ERROR, f"No matching dataframe found for enum file: {enum_file_name}", source_file="batch_builder.py")
             return []
 
         # Get ALL unique values from the first column (no chunk filtering)
@@ -214,5 +214,5 @@ def get_enum_values(enum_file_name, dataframes_dict):
         return enum_values
 
     except Exception as e:
-        logger.log_error(f"Error fetching enum values: {str(e)}", source_file="batch_builder.py")
+        logger.log(LogLevel.ERROR, f"Error fetching enum values: {str(e)}", source_file="batch_builder.py")
         return []

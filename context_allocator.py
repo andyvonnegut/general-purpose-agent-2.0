@@ -1,6 +1,6 @@
 import pandas as pd
 import tiktoken
-from unified_logger import get_logger
+from unified_logger import get_logger, LogLevel
 import json
 import os
 
@@ -22,13 +22,13 @@ def allocate_context(dataframes_dict, selected_job_name):
         # Retrieve job configuration
         gpa_job_configuration = dataframes_dict.get('GPA_Job_Configuration')
         if gpa_job_configuration is None:
-            logger.log_error("gpa_job_configuration file is missing.", source_file="context_allocator.py")
+            logger.log(LogLevel.ERROR, "gpa_job_configuration file is missing.", source_file="context_allocator.py")
             return {}
 
         # Get model parameters for the selected job
         selected_job = gpa_job_configuration[gpa_job_configuration['Job_Name'] == selected_job_name]
         if selected_job.empty:
-            logger.log_error(f"No configuration found for job: {selected_job_name}", source_file="context_allocator.py")
+            logger.log(LogLevel.ERROR, f"No configuration found for job: {selected_job_name}", source_file="context_allocator.py")
             return {}
 
         selected_model = selected_job['Model'].values[0]
@@ -37,7 +37,7 @@ def allocate_context(dataframes_dict, selected_job_name):
         available_context = input_context_limit - overhead_tokens
 
         if available_context <= 0:
-            logger.log_error("Available context is less than or equal to 0.", source_file="context_allocator.py")
+            logger.log(LogLevel.ERROR, "Available context is less than or equal to 0.", source_file="context_allocator.py")
             return {}
 
         # Initialize tokenizer for the selected model
@@ -84,7 +84,7 @@ def allocate_context(dataframes_dict, selected_job_name):
         if num_question_context_dataframes > 0:
             question_context_tokens += num_question_context_dataframes * empty_json_token_count
 
-        logger.log("INFO", f"Total Question Context Tokens (sent with EVERY record): {question_context_tokens}")
+        logger.log(LogLevel.INFO, f"Total Question Context Tokens (sent with EVERY record): {question_context_tokens}")
         print(f"Total Question Context Tokens (sent with EVERY record): {question_context_tokens}")
 
         # Validate that each record + all question context fits within available context
@@ -138,14 +138,14 @@ def allocate_context(dataframes_dict, selected_job_name):
             error_msg += f"4. Simplify/reduce the input data records\n"
             error_msg += "="*80
 
-            logger.log_error(error_msg, source_file="context_allocator.py")
+            logger.log(LogLevel.ERROR, error_msg, source_file="context_allocator.py")
             print(error_msg)
             return {}
 
         # Success! All records fit
-        logger.log("INFO", f"Validation successful: All {total_records} records fit within token limits")
-        logger.log("INFO", f"Largest record: {max_record_tokens} tokens")
-        logger.log("INFO", f"Max tokens per request: {max_record_tokens + question_context_tokens} tokens")
+        logger.log(LogLevel.INFO, f"Validation successful: All {total_records} records fit within token limits")
+        logger.log(LogLevel.INFO, f"Largest record: {max_record_tokens} tokens")
+        logger.log(LogLevel.INFO, f"Max tokens per request: {max_record_tokens + question_context_tokens} tokens")
 
         print(f"\nValidation successful!")
         print(f"Total records to process: {total_records}")
@@ -179,5 +179,5 @@ def allocate_context(dataframes_dict, selected_job_name):
         return context_allocation
 
     except Exception as e:
-        logger.log_error(f"Error occurred during context allocation: {str(e)}", source_file="context_allocator.py")
+        logger.log(LogLevel.ERROR, f"Error occurred during context allocation: {str(e)}", source_file="context_allocator.py")
         return {}
