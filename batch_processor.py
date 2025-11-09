@@ -165,6 +165,14 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                         response_format=response_format
                     )
 
+                    # Log detailed API response for debugging
+                    logger.log(LogLevel.DEBUG,
+                              f"Batch {batch_id} - API Response: "
+                              f"finish_reason={completion.choices[0].finish_reason}, "
+                              f"refusal={getattr(completion.choices[0].message, 'refusal', None)}, "
+                              f"content_length={len(completion.choices[0].message.content) if completion.choices[0].message.content else 0}",
+                              source_file="batch_processor.py")
+
                     # Extract response
                     choice = completion.choices[0].message.content
 
@@ -173,7 +181,7 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                         response_data = json.loads(choice)
                         results = response_data.get('results', [])
                     except json.JSONDecodeError:
-                        logger.log(LogLevel.ERROR, f"Failed to parse response for batch {batch_id}",
+                        logger.log(LogLevel.ERROR, f"Failed to parse response for batch {batch_id}. Response: {choice[:500]}",
                                   source_file="batch_processor.py")
                         async with state_lock:
                             state['failed'] += 1
@@ -181,8 +189,43 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                         return
 
                     if not results:
-                        logger.log(LogLevel.WARNING, f"No results for batch {batch_id}",
+                        # Handle response_format which may be dict or string
+                        if isinstance(response_format, str):
+                            response_format_dict = json.loads(response_format)
+                        else:
+                            response_format_dict = response_format
+
+                        # Log full details for debugging
+                        debug_info = {
+                            'batch_id': batch_id,
+                            'finish_reason': completion.choices[0].finish_reason,
+                            'refusal': getattr(completion.choices[0].message, 'refusal', None),
+                            'response_data': response_data,
+                            'record_preview': record_json_str[:200],
+                            'response_format_name': response_format_dict.get('json_schema', {}).get('name', 'unknown'),
+                            'usage': {
+                                'prompt_tokens': completion.usage.prompt_tokens,
+                                'completion_tokens': completion.usage.completion_tokens
+                            }
+                        }
+                        logger.log(LogLevel.ERROR,
+                                  f"Empty results for batch {batch_id}. Details: {json.dumps(debug_info, indent=2)}",
                                   source_file="batch_processor.py")
+
+                        # Save full request/response to debug file
+                        debug_folder = f"Logs/debug/{selected_job_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        os.makedirs(debug_folder, exist_ok=True)
+                        with open(f"{debug_folder}/batch_{batch_id}_empty_results.json", 'w') as f:
+                            json.dump({
+                                'messages': messages,
+                                'response_format': response_format_dict,
+                                'completion': {
+                                    'content': completion.choices[0].message.content,
+                                    'finish_reason': completion.choices[0].finish_reason,
+                                    'refusal': getattr(completion.choices[0].message, 'refusal', None)
+                                }
+                            }, f, indent=2)
+
                         async with state_lock:
                             state['failed'] += 1
                             state['in_flight'] -= 1
@@ -227,7 +270,9 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                         state['total_output_tokens'] += completion.usage.completion_tokens
 
                 except Exception as e:
-                    logger.log(LogLevel.ERROR, f"Error processing batch {batch_id}: {str(e)}",
+                    import traceback
+                    error_details = traceback.format_exc()
+                    logger.log(LogLevel.ERROR, f"Error processing batch {batch_id}: {str(e)}\n{error_details}",
                               source_file="batch_processor.py")
                     async with state_lock:
                         state['failed'] += 1

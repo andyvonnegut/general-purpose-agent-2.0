@@ -41,7 +41,12 @@ def allocate_context(dataframes_dict, selected_job_name):
             return {}
 
         # Initialize tokenizer for the selected model
-        tokenizer = tiktoken.encoding_for_model(selected_model)
+        try:
+            tokenizer = tiktoken.encoding_for_model(selected_model)
+        except KeyError:
+            # If the model is not recognized by tiktoken, use o200k_base encoding (GPT-4o compatible)
+            logger.log(LogLevel.WARNING, f"Model '{selected_model}' not recognized by tiktoken. Using o200k_base encoding as fallback.", source_file="context_allocator.py")
+            tokenizer = tiktoken.get_encoding("o200k_base")
 
         # Calculate total question context tokens (we'll send ALL of this with each record)
         question_context_tokens = 0

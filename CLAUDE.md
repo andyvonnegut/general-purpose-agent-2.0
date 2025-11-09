@@ -462,11 +462,93 @@ semaphore = asyncio.Semaphore(10)  # Reduce from 50 to 10
 ### Out of Memory Errors
 For very large datasets, consider processing in smaller batches by splitting input files.
 
+### Enhanced Error Logging and Debugging
+
+**Version 2.0.1 Update**: The system now includes comprehensive error logging and debug file generation for troubleshooting API failures.
+
+#### Debug File Structure
+
+When API requests fail or return empty results, debug files are automatically created:
+
+**Location**: `Logs/debug/{job_name}_{timestamp}/batch_{id}_empty_results.json`
+
+**Contents**:
+```json
+{
+  "messages": [...],           // Full API request messages
+  "response_format": {...},    // Complete JSON schema sent to API
+  "completion": {
+    "content": "...",          // API response content
+    "finish_reason": "stop",   // Why API stopped (stop, length, etc.)
+    "refusal": null            // Any refusal message from API
+  }
+}
+```
+
+#### Session Logs
+
+**Location**: `Logs/sessions/{job_name}_{timestamp}.log`
+
+**Log Levels**:
+- `DEBUG`: Detailed API responses, token counts, processing details
+- `INFO`: Progress updates, successful operations
+- `WARNING`: Empty results, non-critical issues
+- `ERROR`: Failed requests with full stack traces
+
+**Enhanced Error Details Include**:
+- Batch ID and source file
+- API finish reason and refusal messages
+- Token usage (prompt and completion)
+- Response data structure
+- Record preview (first 200 characters)
+- Response format name
+
+#### Debugging Empty Results
+
+If you see "No results for batch X" warnings:
+
+1. **Check session log for ERROR entries**:
+   ```bash
+   grep ERROR Logs/sessions/Demo_Builder_*.log
+   ```
+
+2. **Examine debug JSON files**:
+   ```bash
+   cat Logs/debug/Demo_Builder_*/batch_*_empty_results.json | jq .
+   ```
+
+3. **Common causes**:
+   - **Model refusal**: Check `completion.refusal` field
+   - **Schema mismatch**: Review `response_format` vs actual output
+   - **Token limits**: Check `usage` tokens in debug info
+   - **Invalid input**: Review `messages[2].content` for the record data
+
+#### Tiktoken Fallback
+
+For newer models not recognized by tiktoken:
+- System automatically falls back to `o200k_base` encoding
+- Warning logged: "Model '{model}' not recognized by tiktoken"
+- Token counts may be approximate but conservative
+
+### Model Not Found Errors
+If you encounter model-related errors:
+1. Verify model exists in `Configuration_Files/GPA_Job_Configuration.csv`
+2. Ensure model has pricing in `Configuration_Files/API_Pricing.csv`
+3. Check tiktoken compatibility (automatic fallback handles most cases)
+
 ## Contributing
 
 Repository: https://github.com/andyvonnegut/general-purpose-agent-2.0
 
 ## Version History
+
+**Version 2.0.1** (2025-11-09) - Enhanced Error Logging
+- Added comprehensive debug logging for API failures
+- Automatic debug file generation for empty results
+- Tiktoken fallback for newer models (uses o200k_base)
+- Enhanced error messages with full stack traces
+- Fixed json.loads error when response_format is already dict
+- Improved troubleshooting documentation
 
 **Version 2.0** (2025-10-25) - Parallel Processing Revolution
 - Complete architectural rewrite for async/parallel processing
@@ -490,4 +572,4 @@ For detailed specifications, see:
 - `PRD.md` - Complete product requirements
 - This file (CLAUDE.md) - Technical documentation
 
-Last updated: 2025-10-25
+Last updated: 2025-11-09
