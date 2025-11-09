@@ -292,19 +292,46 @@ For enum types in GPA_Questions.csv:
 
 ### Adding a New Job Type
 
-1. **Update GPA_Job_Configuration.csv**
-   - Add row with Job_Name, Model, token limits, descriptions, role
+**Step 1: Choose a Model and Check Temperature Constraints**
+   - Select model from `Configuration_Files/API_Pricing.csv`
+   - **IMPORTANT**: Check the `Supported_Temperatures` column
+     - gpt-5-* models: **temperature must be 1** (default only)
+     - gpt-4o-* models: temperature can be 0-2
+     - o1/o3 models: **temperature must be 1** (default only)
+   - If your model shows "1 (default only)", use `Temperature: 1` in configuration
 
-2. **Update GPA_Questions.csv**
-   - Define output schema fields for the new job
-   - Use appropriate types: string, integer, boolean, number, enum
-   - For enum types, specify enum_file_name
+**Step 2: Update GPA_Job_Configuration.csv**
+   - Add row with: Job_Name, Model, Input_Context_Limit, Input_Context_Overhead, Output_Context_Limit, Temperature, Tool_Descriptions, Assistant_Role, Apply_Relevance_Filter
+   - Example row:
+   ```csv
+   MSA_Distance,gpt-5-2025-08-07,112000,8000,16000,1,"Describes job purpose","Describes model's role",No
+   ```
+   - **Temperature must match the model's supported range** (see API_Pricing.csv)
 
-3. **Prepare Input Data**
+**Step 3: Update GPA_Questions.csv**
+   - For each output field, add row: Job_Name, Key, Type, Description, Max_Length, enum_file_name
+   - Supported types:
+     - `string`: Text output
+     - `number`: Numeric values (integers or decimals)
+     - `integer`: Whole numbers only
+     - `boolean`: True/False
+     - `enum`: Fixed set of values (requires enum_file_name referencing a file in Question_Context/)
+   - Example rows:
+   ```csv
+   MSA_Distance,Row_Id,number,The Row_Id of the record being reviewed,,
+   MSA_Distance,Distance_Miles,number,Distance in miles,,
+   MSA_Distance,Border_Point,string,Name of border location,,
+   ```
+
+**Step 4: Prepare Input Data**
    - Place CSV or Excel file(s) in `Context/Record_Context/`
-   - Optionally add example Q&A in `Context/Question_Context/`
+   - Optionally add example Q&A pairs in `Context/Question_Context/`
+   - For enum types, place reference data file in `Context/Question_Context/`
 
-4. **Run and Test**
+**Step 5: Add to API_Pricing.csv (if using new model)**
+   - Add row with: Model, Input_Cost_Per_Million, Cached_Input_Cost_Per_Million, Output_Cost_Per_Million, Supported_Temperatures
+
+**Step 6: Run and Test**
    ```bash
    python3 main.py
    # Select new job from menu
@@ -313,6 +340,12 @@ For enum types in GPA_Questions.csv:
    # Check Results/{job_name}_results.csv
    # Review Logs/ for errors
    ```
+
+**Common Mistakes to Avoid**:
+- ❌ Using temperature=0.2 with gpt-5-* models (will fail with 400 error)
+- ❌ Forgetting to add pricing info in API_Pricing.csv
+- ❌ Mismatched Job_Name between configuration and questions
+- ❌ Using unsupported field types in questions CSV
 
 ### Debugging Tips
 
