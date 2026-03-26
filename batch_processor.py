@@ -66,6 +66,21 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                       source_file="batch_processor.py", function_name="process_batches")
             return
 
+        # Load the output schema so CSV rows are always written in a stable column order.
+        questions_df = dataframes_dict.get('GPA_Questions')
+        if questions_df is None:
+            logger.log(LogLevel.ERROR, "GPA_Questions configuration not found in dataframes_dict",
+                      source_file="batch_processor.py", function_name="process_batches")
+            return
+
+        job_questions = questions_df[questions_df['Job_Name'] == selected_job_name]
+        if job_questions.empty:
+            logger.log(LogLevel.ERROR, f"No GPA_Questions configuration found for job {selected_job_name}",
+                      source_file="batch_processor.py", function_name="process_batches")
+            return
+
+        result_columns = job_questions['Key'].tolist() + ['source_file', 'batch_id']
+
         # Load the API key
         my_api_key = load_api_key()
         if not my_api_key:
@@ -243,7 +258,8 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                         total_cost = 0.0
 
                     # Append to results (exactly what the model returns - single result item)
-                    result_row = results[0] if len(results) > 0 else {}
+                    raw_result_row = results[0] if len(results) > 0 else {}
+                    result_row = {column: raw_result_row.get(column, '') for column in result_columns}
 
                     # Add metadata
                     result_row['source_file'] = batch_row['source_file']
@@ -253,12 +269,12 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
                     async with csv_lock:
                         # Initialize CSV if needed
                         if not state['csv_file_initialized']:
-                            results_df = pd.DataFrame([result_row])
+                            results_df = pd.DataFrame([result_row], columns=result_columns)
                             results_df.to_csv(output_file, index=False, mode='w')
                             state['csv_file_initialized'] = True
                         else:
                             # Append to existing CSV
-                            results_df = pd.DataFrame([result_row])
+                            results_df = pd.DataFrame([result_row], columns=result_columns)
                             results_df.to_csv(output_file, index=False, mode='a', header=False)
 
                     # Update state
