@@ -11,6 +11,18 @@ from unified_logger import LogLevel, get_logger
 # Global shutdown flag
 shutdown_requested = False
 
+def sanitize_csv_value(value):
+    """Normalize string values so CSV imports do not break on embedded control characters."""
+    if not isinstance(value, str):
+        return value
+
+    sanitized = value.replace('\x00a0', ' ')
+    sanitized = sanitized.replace('\x00', ' ')
+    sanitized = sanitized.replace('\r\n', ' ')
+    sanitized = sanitized.replace('\r', ' ')
+    sanitized = sanitized.replace('\n', ' ')
+    return sanitized.strip()
+
 def signal_handler(signum, frame):
     """Handle Ctrl+C gracefully"""
     global shutdown_requested
@@ -266,10 +278,13 @@ async def process_batches(
 
                     # Append to results (exactly what the model returns - single result item)
                     raw_result_row = results[0] if len(results) > 0 else {}
-                    result_row = {column: raw_result_row.get(column, '') for column in result_columns}
+                    result_row = {
+                        column: sanitize_csv_value(raw_result_row.get(column, ''))
+                        for column in result_columns
+                    }
 
                     # Add metadata
-                    result_row['source_file'] = batch_row['source_file']
+                    result_row['source_file'] = sanitize_csv_value(batch_row['source_file'])
                     result_row['batch_id'] = batch_id
 
                     # Write to CSV (thread-safe)

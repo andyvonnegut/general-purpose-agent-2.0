@@ -16,6 +16,7 @@ Taxonomy_Finder,Cause_Code,string,The cause code we're trying to match to the ta
 Taxonomy_Finder,Taxonomy_Value,enum,The value from the taxonomy list we're trying to match the cause code to.,,
 Taxonomy_Finder,Good_Match,boolean,Is the chosen taxonomy value a good match for the cause?,,
 Taxonomy_Finder,New_Taxonomy,string,If the selected taxonomy is not a good match for the cause recommend a new taxonomy value,,
+French_Translator,Row_Id,number,The Row_Id of the record being reviewed,,
 French_Translator,Field_Label,string,The English Language Label we're trying to translate,,
 French_Translator,Translated_French_Labels,string,The context appropriate French Language translation or the original supplied value if it's a proper noun that should not be translated,,
 French_Translator,Translation_Explanation,string,A plain language explanation of the translation given examples.,,
