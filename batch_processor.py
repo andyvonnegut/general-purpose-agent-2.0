@@ -20,9 +20,15 @@ def signal_handler(signum, frame):
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
 
-async def process_batches(batches_df, dataframes_dict, selected_job_name, logger):
+async def process_batches(
+    batches_df,
+    dataframes_dict,
+    selected_job_name,
+    logger,
+    max_parallel_requests=50
+):
     """
-    Version 2.0: Processes batches in parallel with up to 50 concurrent requests.
+    Version 2.0: Processes batches in parallel with a configurable request limit.
     Each batch is one record + all question context.
 
     Args:
@@ -30,6 +36,7 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
         dataframes_dict (dict): Dictionary containing data such as record and question contexts.
         selected_job_name (str): The name of the job being processed.
         logger: The unified logger instance.
+        max_parallel_requests (int): Maximum number of concurrent requests to allow.
 
     Returns:
         None
@@ -106,13 +113,13 @@ async def process_batches(batches_df, dataframes_dict, selected_job_name, logger
         start_time = datetime.now()
 
         print(f"\nStarting parallel processing of {total_batches} records...")
-        print(f"Maximum concurrent requests: 50")
+        print(f"Maximum concurrent requests: {max_parallel_requests}")
         print(f"Model: {model_name}")
         print(f"Temperature: {temperature}")
         print("=" * 80)
 
         # Create semaphore to limit concurrent requests
-        semaphore = asyncio.Semaphore(50)
+        semaphore = asyncio.Semaphore(max_parallel_requests)
 
         # Shared state for tracking
         state = {

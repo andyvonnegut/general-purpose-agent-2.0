@@ -9,7 +9,7 @@ AI-Powered Parallel Batch Processing System
 Version 2.0 represents a fundamental shift from chunked batch processing to parallel, per-record processing:
 
 - **1 Record = 1 API Request**: Each record is processed individually rather than in chunks
-- **50 Concurrent Requests**: Process up to 50 records simultaneously using async/await
+- **Configurable Concurrent Requests**: Choose the max parallel requests at runtime, defaulting to 50
 - **All Examples Included**: Since we're only sending one record at a time, we have plenty of token budget to include all question context examples with every request
 - **Real-time Results**: Results are written to CSV as requests complete (thread-safe)
 - **Better Scalability**: Dramatically faster processing for large datasets
@@ -52,7 +52,7 @@ pip install openai pandas tiktoken openpyxl
 python3 main.py
 ```
 
-Follow the interactive prompts to select and run a job.
+Follow the interactive prompts to select a job and optionally override the max parallel threads. Press Enter to use the default of 50.
 
 ## Architecture
 
@@ -67,7 +67,7 @@ Follow the interactive prompts to select and run a job.
    ↓
 4. batch_builder.py (creates one batch per record with all question context)
    ↓
-5. batch_processor.py (async processor with 50 concurrent requests)
+5. batch_processor.py (async processor with user-selected concurrent requests)
    ↓
 6. Real-time CSV writing (thread-safe append as each request completes)
 ```
@@ -106,7 +106,7 @@ Place your input data in:
 
 ## Performance
 
-With 50 concurrent requests:
+With the default 50 concurrent requests:
 - **Small jobs** (< 100 records): Completes in seconds
 - **Medium jobs** (100-1000 records): Completes in minutes
 - **Large jobs** (1000+ records): Scales linearly

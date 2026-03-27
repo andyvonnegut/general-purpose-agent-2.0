@@ -8,6 +8,8 @@ from context_allocator import allocate_context
 from batch_builder import build_batches
 from batch_processor import process_batches
 
+DEFAULT_MAX_PARALLEL_REQUESTS = 50
+
 def prompt_user_for_job(job_config_df, logger):
     """
     Prompts the user to select a job from the available job configurations.
@@ -39,6 +41,37 @@ def prompt_user_for_job(job_config_df, logger):
                           to_file=False)
         except ValueError:
             logger.log(LogLevel.WARNING, "Invalid input. Please enter a valid number.", to_file=False)
+
+def prompt_user_for_max_parallel_requests(logger, default=DEFAULT_MAX_PARALLEL_REQUESTS):
+    """
+    Prompts the user for the maximum number of parallel requests to run.
+
+    Args:
+        logger: The unified logger instance.
+        default (int): The default concurrency to use when the user presses Enter
+            or provides invalid input.
+
+    Returns:
+        int: The selected maximum concurrency.
+    """
+    user_input = input(f"Enter max parallel threads [{default}]: ").strip()
+
+    if not user_input:
+        return default
+
+    try:
+        max_parallel_requests = int(user_input)
+        if max_parallel_requests > 0:
+            return max_parallel_requests
+    except ValueError:
+        pass
+
+    logger.log(
+        LogLevel.WARNING,
+        f"Invalid max parallel threads value. Using default: {default}",
+        to_file=False
+    )
+    return default
 
 def save_batches_to_csv(batches_df, selected_job_name, logger):
     """
@@ -86,10 +119,12 @@ def main():
 
         # Step 3: List jobs and prompt user to pick one
         selected_job_name = prompt_user_for_job(gpa_job_config, logger)
-        logger.log(LogLevel.INFO, f"You selected the job: {selected_job_name}")
+        max_parallel_requests = prompt_user_for_max_parallel_requests(logger)
 
         # Update logger with job name
         logger = get_logger(selected_job_name)
+        logger.log(LogLevel.INFO, f"You selected the job: {selected_job_name}")
+        logger.log(LogLevel.INFO, f"Max parallel threads: {max_parallel_requests}")
 
         # Step 4: Validate context allocation (no chunking in 2.0)
         logger.log(LogLevel.INFO, "Validating context allocation...")
@@ -119,7 +154,15 @@ def main():
 
         # Step 8: Process all batches in parallel (async)
         logger.log(LogLevel.INFO, "Starting parallel batch processing...")
-        asyncio.run(process_batches(batches_df, dataframes_dict, selected_job_name, logger))
+        asyncio.run(
+            process_batches(
+                batches_df,
+                dataframes_dict,
+                selected_job_name,
+                logger,
+                max_parallel_requests=max_parallel_requests
+            )
+        )
         logger.log(LogLevel.INFO, "Parallel batch processing complete.")
 
     except Exception as e:

@@ -6,12 +6,12 @@ General Purpose Agent 2.0 is a high-performance batch processing system that lev
 **Version**: 2.0
 **Language**: Python 3.11+
 **Primary Framework**: OpenAI AsyncAPI with structured outputs
-**Concurrency Model**: Async/await with semaphore-controlled parallelism (50 concurrent requests)
+**Concurrency Model**: Async/await with semaphore-controlled parallelism (user-selected, default 50 concurrent requests)
 
 ## What's New in Version 2.0
 
 ### Architectural Revolution
-- **Parallel Processing**: Up to 50 simultaneous API requests
+- **Parallel Processing**: User-selected concurrency with a default of 50 simultaneous API requests
 - **No Chunking**: Each record processed individually
 - **Complete Context**: All question examples sent with every request
 - **Real-time Results**: CSV appending as requests complete
@@ -19,7 +19,7 @@ General Purpose Agent 2.0 is a high-performance batch processing system that lev
 - **Enhanced Progress**: Live tracking of completed/failed/in-flight requests
 
 ### Performance Improvements
-- **50x faster** for large datasets (compared to v1.0 sequential processing)
+- **Up to 50x faster** for large datasets at the default concurrency (compared to v1.0 sequential processing)
 - Real-time cost tracking across all parallel requests
 - Immediate feedback on processing status
 
@@ -49,6 +49,7 @@ pip install -r requirements.txt
 python3 main.py
 
 # Follow the interactive prompts to select a job
+# Then enter max parallel threads or press Enter to use 50
 # Press Ctrl+C to gracefully stop processing at any time
 ```
 
@@ -64,7 +65,7 @@ python3 main.py
    ↓
 4. batch_builder.py (creates one batch per record with all question context)
    ↓
-5. batch_processor.py (async parallel processor - 50 concurrent requests)
+5. batch_processor.py (async parallel processor - user-selected concurrent requests)
    ↓
 6. Real-time CSV writing (thread-safe append as each request completes)
 ```
@@ -73,6 +74,7 @@ python3 main.py
 
 **main.py** - Async entry point and orchestrator
 - Interactive job selection menu
+- Runtime prompt for max parallel threads (default 50 on Enter or invalid input)
 - Orchestrates the entire processing pipeline
 - Uses `asyncio.run()` to execute parallel batch processing
 - Progress tracking and reporting
@@ -102,7 +104,7 @@ python3 main.py
 
 **batch_processor.py** - Parallel API processing (v2.0 complete rewrite)
 - **Async/Await**: Uses `AsyncOpenAI` client for non-blocking requests
-- **Semaphore Control**: `asyncio.Semaphore(50)` limits concurrent requests
+- **Semaphore Control**: `asyncio.Semaphore(max_parallel_requests)` limits concurrent requests
 - **Thread-Safe CSV**: Uses `asyncio.Lock` for safe concurrent writes
 - **Real-time Progress**: Shows completed/failed/in-flight counts during processing
 - **Graceful Shutdown**: Signal handler for Ctrl+C allows in-flight requests to complete
@@ -231,7 +233,7 @@ Each DataFrame gets augmented with:
 3. Validate each record + all question context fits in available context
 4. Build one batch per record
 5. Create async tasks for all batches
-6. Use semaphore to limit to 50 concurrent requests
+6. Use semaphore to limit to the user-selected concurrent request count (default 50)
 7. Append results to CSV as each request completes
 8. Track progress, costs, and errors in real-time
 
@@ -372,18 +374,18 @@ For enum types in GPA_Questions.csv:
 - Check network connectivity
 - Verify API key is valid
 - Review error logs for API rate limiting or errors
-- Try reducing parallelism by modifying semaphore limit in batch_processor.py
+- Try reducing parallelism by entering a lower max parallel thread count at startup
 
 ## Parallel Processing Details
 
 ### Concurrency Control
 ```python
 # batch_processor.py
-semaphore = asyncio.Semaphore(50)  # Max 50 concurrent requests
+semaphore = asyncio.Semaphore(max_parallel_requests)
 
 async def process_single_batch(batch_row):
     async with semaphore:
-        # Only 50 tasks can execute this block simultaneously
+        # Only max_parallel_requests tasks can execute this block simultaneously
         # Others wait until a slot becomes available
         ...
 ```
@@ -585,7 +587,7 @@ Repository: https://github.com/andyvonnegut/general-purpose-agent-2.0
 
 **Version 2.0** (2025-10-25) - Parallel Processing Revolution
 - Complete architectural rewrite for async/parallel processing
-- 50 concurrent requests with semaphore control
+- User-selected concurrent requests with semaphore control (default 50)
 - No chunking - individual record processing
 - All question context sent with every request
 - Real-time CSV writing and progress tracking
