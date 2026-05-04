@@ -9,6 +9,7 @@ from batch_builder import build_batches
 from batch_processor import process_batches
 
 DEFAULT_MAX_PARALLEL_REQUESTS = 50
+MAX_PARALLEL_REQUESTS_LIMIT = 1000
 
 def prompt_user_for_job(job_config_df, logger):
     """
@@ -54,21 +55,24 @@ def prompt_user_for_max_parallel_requests(logger, default=DEFAULT_MAX_PARALLEL_R
     Returns:
         int: The selected maximum concurrency.
     """
-    user_input = input(f"Enter max parallel threads [{default}]: ").strip()
+    user_input = input(
+        f"Enter max parallel threads (1-{MAX_PARALLEL_REQUESTS_LIMIT}) [{default}]: "
+    ).strip()
 
     if not user_input:
         return default
 
     try:
         max_parallel_requests = int(user_input)
-        if max_parallel_requests > 0:
+        if 1 <= max_parallel_requests <= MAX_PARALLEL_REQUESTS_LIMIT:
             return max_parallel_requests
     except ValueError:
         pass
 
     logger.log(
         LogLevel.WARNING,
-        f"Invalid max parallel threads value. Using default: {default}",
+        f"Invalid max parallel threads value (must be 1-{MAX_PARALLEL_REQUESTS_LIMIT}). "
+        f"Using default: {default}",
         to_file=False
     )
     return default
