@@ -187,16 +187,17 @@ class UnifiedLogger:
         """Log complete API call with request and response to api_calls.csv."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        headers = ['timestamp', 'job_name', 'model', 'temperature', 'batch_id',
+        headers = ['timestamp', 'session_id', 'job_name', 'model', 'temperature', 'batch_id',
                    'request_json', 'response_json', 'input_tokens', 'output_tokens',
                    'input_cost', 'output_cost', 'total_cost', 'status']
 
         row = {
             'timestamp': timestamp,
+            'session_id': self.session_id,
             'job_name': self.job_name or 'general',
             'model': request_data.get('model', ''),
             'temperature': request_data.get('temperature', ''),
-            'batch_id': batch_id or '',
+            'batch_id': '' if batch_id is None else batch_id,
             'request_json': json.dumps(request_data),
             'response_json': json.dumps(response_data) if response_data else '',
             'input_tokens': cost_info.get('input_tokens', 0),

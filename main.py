@@ -6,7 +6,7 @@ from unified_logger import get_logger, LogLevel
 from data_loader import load_data
 from context_allocator import allocate_context
 from batch_builder import build_batches
-from batch_processor import process_batches
+from batch_processor import process_batches, install_signal_handler
 
 DEFAULT_MAX_PARALLEL_REQUESTS = 50
 MAX_PARALLEL_REQUESTS_LIMIT = 1000
@@ -108,6 +108,9 @@ def main():
     """
     # Initialize logger
     logger = get_logger()
+
+    # Register Ctrl+C handler for graceful shutdown (CLI only)
+    install_signal_handler()
 
     try:
         # Step 1: Load data

@@ -12,6 +12,9 @@ tiktoken>=0.5.0
 # Excel file support
 openpyxl>=3.1.0
 
+# Model Context Protocol server SDK (stdio MCP interface)
+mcp>=1.2.0
+
 # Standard library modules (included with Python, listed for reference)
 # - asyncio (Python 3.11+)
 # - csv

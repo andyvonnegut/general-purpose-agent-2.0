@@ -29,8 +29,16 @@ def signal_handler(signum, frame):
     shutdown_requested = True
     print("\n\nShutdown requested. Waiting for in-flight requests to complete...")
 
-# Register signal handler
-signal.signal(signal.SIGINT, signal_handler)
+def install_signal_handler():
+    """Register the SIGINT handler. Called by the CLI (main.py) only.
+
+    Importing this module no longer registers a process-wide handler, so an
+    MCP host that imports batch_processor keeps control of its own signals.
+    Signal handlers can only be installed on the main thread; guard for that.
+    """
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, signal_handler)
 
 async def process_batches(
     batches_df,
@@ -51,27 +59,29 @@ async def process_batches(
         max_parallel_requests (int): Maximum number of concurrent requests to allow.
 
     Returns:
-        None
+        dict: Summary of the run with keys total_records, succeeded, failed,
+            duration_seconds, input_tokens, output_tokens, total_cost. Returns
+            an empty dict on early-exit guard conditions.
     """
     try:
         # Check if batches_df is empty
         if batches_df.empty:
             logger.log(LogLevel.WARNING, "No batches to process.")
-            return
+            return {}
 
         # Get job configuration
         job_config_df = dataframes_dict.get('GPA_Job_Configuration')
         if job_config_df is None:
             logger.log(LogLevel.ERROR, "GPA_Job_Configuration not found in dataframes_dict",
                       source_file="batch_processor.py", function_name="process_batches")
-            return
+            return {}
 
         # Get the job configuration for the selected job
         job_config = job_config_df[job_config_df['Job_Name'] == selected_job_name]
         if job_config.empty:
             logger.log(LogLevel.ERROR, f"Job configuration for {selected_job_name} not found",
                       source_file="batch_processor.py", function_name="process_batches")
-            return
+            return {}
 
         # Extract model name and temperature from job config
         model_name = job_config.iloc[0]['Model']
@@ -83,20 +93,20 @@ async def process_batches(
         if pricing_df is None:
             logger.log(LogLevel.ERROR, "API_Pricing configuration not found in dataframes_dict",
                       source_file="batch_processor.py", function_name="process_batches")
-            return
+            return {}
 
         # Load the output schema so CSV rows are always written in a stable column order.
         questions_df = dataframes_dict.get('GPA_Questions')
         if questions_df is None:
             logger.log(LogLevel.ERROR, "GPA_Questions configuration not found in dataframes_dict",
                       source_file="batch_processor.py", function_name="process_batches")
-            return
+            return {}
 
         job_questions = questions_df[questions_df['Job_Name'] == selected_job_name]
         if job_questions.empty:
             logger.log(LogLevel.ERROR, f"No GPA_Questions configuration found for job {selected_job_name}",
                       source_file="batch_processor.py", function_name="process_batches")
-            return
+            return {}
 
         result_columns = job_questions['Key'].tolist() + ['source_file', 'batch_id']
 
@@ -105,7 +115,7 @@ async def process_batches(
         if not my_api_key:
             logger.log(LogLevel.ERROR, "Failed to load API key",
                       source_file="batch_processor.py", function_name="process_batches")
-            return
+            return {}
 
         # Create async OpenAI client
         client = AsyncOpenAI(api_key=my_api_key)
@@ -144,6 +154,27 @@ async def process_batches(
             'csv_file_initialized': False
         }
         state_lock = asyncio.Lock()
+
+        def build_cost_info(completion):
+            """Tokens + cost for a completion (model-priced), or zeros if usage
+            is unavailable. Shape matches unified_logger.log_api_call_complete."""
+            usage = getattr(completion, 'usage', None) if completion is not None else None
+            in_tok = getattr(usage, 'prompt_tokens', 0) or 0
+            out_tok = getattr(usage, 'completion_tokens', 0) or 0
+            pr = pricing_df[pricing_df['Model'] == model_name]
+            if not pr.empty:
+                in_cost = (in_tok / 1_000_000) * float(pr.iloc[0]['Input_Cost_Per_Million'])
+                out_cost = (out_tok / 1_000_000) * float(pr.iloc[0]['Output_Cost_Per_Million'])
+            else:
+                in_cost = out_cost = 0.0
+            return {
+                'model': model_name,
+                'input_tokens': in_tok,
+                'output_tokens': out_tok,
+                'input': in_cost,
+                'output': out_cost,
+                'total': in_cost + out_cost,
+            }
 
         async def process_single_batch(batch_row):
             """Process a single batch (one record)"""
@@ -191,6 +222,15 @@ async def process_batches(
                             {"role": "user", "content": f"[{record_json_str}]"},
                         ]
 
+                    # Request payload captured for the per-record transcript
+                    # (Logs/api_calls/api_calls.csv via log_api_call_complete).
+                    request_data = {
+                        "model": model_name,
+                        "temperature": temperature,
+                        "source_file": batch_row.get('source_file', ''),
+                        "messages": messages,
+                    }
+
                     # Make API call
                     completion = await client.beta.chat.completions.parse(
                         model=model_name,
@@ -217,6 +257,9 @@ async def process_batches(
                     except json.JSONDecodeError:
                         logger.log(LogLevel.ERROR, f"Failed to parse response for batch {batch_id}. Response: {choice[:500]}",
                                   source_file="batch_processor.py")
+                        logger.log_api_call_complete(
+                            request_data, {"raw_content": (choice or "")[:5000]},
+                            build_cost_info(completion), batch_id=batch_id, status='parse_error')
                         async with state_lock:
                             state['failed'] += 1
                             state['in_flight'] -= 1
@@ -260,21 +303,23 @@ async def process_batches(
                                 }
                             }, f, indent=2)
 
+                        logger.log_api_call_complete(
+                            request_data, response_data,
+                            build_cost_info(completion), batch_id=batch_id, status='empty_results')
                         async with state_lock:
                             state['failed'] += 1
                             state['in_flight'] -= 1
                         return
 
                     # Calculate cost
-                    pricing_row = pricing_df[pricing_df['Model'] == model_name]
-                    if not pricing_row.empty:
-                        input_cost_rate = float(pricing_row.iloc[0]['Input_Cost_Per_Million'])
-                        output_cost_rate = float(pricing_row.iloc[0]['Output_Cost_Per_Million'])
-                        input_token_cost = (completion.usage.prompt_tokens / 1_000_000) * input_cost_rate
-                        output_token_cost = (completion.usage.completion_tokens / 1_000_000) * output_cost_rate
-                        total_cost = input_token_cost + output_token_cost
-                    else:
-                        total_cost = 0.0
+                    cost_info = build_cost_info(completion)
+                    total_cost = cost_info['total']
+
+                    # Persist the full prompt + parsed answer for this record so it
+                    # is retrievable later via the transcript MCP tools.
+                    logger.log_api_call_complete(
+                        request_data, response_data, cost_info,
+                        batch_id=batch_id, status='success')
 
                     # Append to results (exactly what the model returns - single result item)
                     raw_result_row = results[0] if len(results) > 0 else {}
@@ -303,15 +348,22 @@ async def process_batches(
                     async with state_lock:
                         state['completed'] += 1
                         state['in_flight'] -= 1
-                        state['total_cost'] += total_cost
-                        state['total_input_tokens'] += completion.usage.prompt_tokens
-                        state['total_output_tokens'] += completion.usage.completion_tokens
+                        state['total_cost'] += cost_info['total']
+                        state['total_input_tokens'] += cost_info['input_tokens']
+                        state['total_output_tokens'] += cost_info['output_tokens']
 
                 except Exception as e:
                     import traceback
                     error_details = traceback.format_exc()
                     logger.log(LogLevel.ERROR, f"Error processing batch {batch_id}: {str(e)}\n{error_details}",
                               source_file="batch_processor.py")
+                    try:
+                        logger.log_api_call_complete(
+                            locals().get('request_data', {}), {"error": str(e)},
+                            build_cost_info(locals().get('completion')),
+                            batch_id=batch_id, status='error')
+                    except Exception:
+                        pass
                     async with state_lock:
                         state['failed'] += 1
                         state['in_flight'] -= 1
@@ -350,9 +402,20 @@ async def process_batches(
         logger.log(LogLevel.INFO, f"Processing complete: {state['completed']}/{total_batches} successful, "
                   f"{state['failed']} failed, ${state['total_cost']:.4f} cost")
 
+        return {
+            'total_records': total_batches,
+            'succeeded': state['completed'],
+            'failed': state['failed'],
+            'duration_seconds': round(duration, 2),
+            'input_tokens': state['total_input_tokens'],
+            'output_tokens': state['total_output_tokens'],
+            'total_cost': round(state['total_cost'], 4),
+        }
+
     except Exception as e:
         logger.log(LogLevel.ERROR, f"Error in parallel processing: {str(e)}",
                   source_file="batch_processor.py", function_name="process_batches")
+        return {}
 
 def load_api_key():
     """

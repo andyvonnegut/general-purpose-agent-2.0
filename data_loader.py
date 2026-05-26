@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from unified_logger import log_error  # Backward compatible import
+from errors import PipelineError
 import sys
 
 # Define the required config files
@@ -11,29 +12,45 @@ required_config_files = [
     'API_Pricing.csv'
 ]
 
-def list_files(directory):
+def list_files(directory, raise_on_error=False):
     """
     Helper function to list all files in a directory, ignoring hidden files.
+
+    Args:
+        directory (str): Directory to list.
+        raise_on_error (bool): If True, raise PipelineError instead of sys.exit()
+            on a missing directory (used by programmatic / MCP callers).
     """
     if not os.path.exists(directory):
         error_message = f"Directory {directory} does not exist."
         log_error("data_loader.py", error_message)
+        if raise_on_error:
+            raise PipelineError(error_message)
         sys.exit(1)  # Exit the script if a folder does not exist
-    
+
     return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and not f.startswith('.')]
 
-def load_data():
+def load_data(raise_on_error=False):
+    """Load all configuration and context CSV/Excel files into a dataframes_dict.
+
+    Args:
+        raise_on_error (bool): If True, raise PipelineError instead of sys.exit()
+            on fatal conditions (missing required config, empty Record_Context).
+            The CLI uses the default (False) and is unchanged.
+    """
     dataframes_dict = {}
 
     # Check if Configuration_Files directory exists
     config_dir = 'Configuration_Files'
-    config_files = list_files(config_dir)
-    
+    config_files = list_files(config_dir, raise_on_error=raise_on_error)
+
     # Check for required config files
     for required_file in required_config_files:
         if required_file not in config_files:
             error_message = f"Required configuration file {required_file} is missing."
             log_error("data_loader.py", error_message)
+            if raise_on_error:
+                raise PipelineError(error_message)
             sys.exit(1)  # Exit the script if a required file is missing
     
     # Load configuration files
@@ -62,11 +79,13 @@ def load_data():
 
     # Check if Record_Context directory exists and is not empty
     record_context_dir = 'Context/Record_Context'
-    record_context_files = list_files(record_context_dir)
-    
+    record_context_files = list_files(record_context_dir, raise_on_error=raise_on_error)
+
     if not record_context_files:
         error_message = f"No data found in the {record_context_dir} directory."
         log_error("data_loader.py", error_message)
+        if raise_on_error:
+            raise PipelineError(error_message)
         sys.exit(1)  # Exit the script if there is no data in the record context folder
     
     # Load Record Context files
