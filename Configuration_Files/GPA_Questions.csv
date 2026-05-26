@@ -99,3 +99,7 @@ Policy_Analyzer2,Effective_Date,string,"The effective date of the policy record 
 Policy_Analyzer2,Expiration_Date,string,"The Expiration date of the policy record in question.  If multiple dates are in the field, or there is a date and non-date information, output the latest date in the field in mm/dd/yyyy format as the expiration date.",,
 Policy_Analyzer2,Premium,number,"The premium for the policy.  If it is a well formatted number leave as is.  If it appears to be multiple premium values, add them up.  If it shows a billed / collected amount (i.e. $70,000 / $70,000) use the denominator or sum of denominators.  Leave blank if blank, unknown for other cases.",,
 Policy_Analyzer2,Explanation,string,"The reason you selected the values you did for effective date, end date, policy #, and endorsement #, and premium",,
+Comment_Sentiment_Labeler,sentiment,string,"Select the overall sentiment of the comment as one of: positive, negative, or neutral; output only the label.",8,
+Comment_Sentiment_Classifier,sentiment,string,"Select the single sentiment label (positive, negative, or neutral) that best matches the overall tone of the comment; output only the label in lowercase.",8,
+Comment_Sentiment_Classifier_2,sentiment,string,"Select the overall sentiment of the comment; return exactly one of: positive, negative, neutral.",8,
+Comment_Sentiment_Classifier_3,sentiment,string,"Return exactly one of: positive, negative, or neutral (lowercase, no punctuation or extra text) representing the overall sentiment of the comment; if mixed/unclear, choose neutral.",8,
