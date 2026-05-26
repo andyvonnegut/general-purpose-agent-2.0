@@ -153,8 +153,30 @@ async def run_job(job_name, max_parallel_requests=50):
 
 
 def run_job_sync(job_name, max_parallel_requests=50):
-    """Synchronous wrapper around run_job for non-async (MCP tool) callers."""
-    return asyncio.run(run_job(job_name, max_parallel_requests=max_parallel_requests))
+    """Synchronous wrapper around run_job for non-async (MCP tool) callers.
+    Runs in a dedicated thread with its own event loop, so this works whether
+    the caller is in an existing event loop (e.g. an async MCP framework) or
+    plain synchronous code."""
+    import threading
+    box: dict = {}
+
+    def _runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            box["result"] = loop.run_until_complete(
+                run_job(job_name, max_parallel_requests=max_parallel_requests)
+            )
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_runner, name=f"gpa-run-{job_name}")
+    t.start()
+    t.join()
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def create_job_from_prompt(prompt, record_paths, model=None,
