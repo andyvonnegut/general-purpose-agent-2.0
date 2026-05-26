@@ -2,14 +2,49 @@ import json
 import pandas as pd
 from unified_logger import get_logger, LogLevel
 
-def build_batches(dataframes_dict, selected_job_name):
+def _pack_chunks(question_records, token_counts, budget):
+    """Greedily pack question-context rows into chunks whose token sums stay at
+    or under `budget`. Returns a list of chunks (each a list of record dicts).
+
+    When `budget` is falsy or token counts are unavailable, the whole context is
+    returned as a single chunk (today's behaviour). A row larger than the budget
+    is placed in its own chunk rather than dropped (the allocator already
+    guarantees a single row fits, this is just defensive).
     """
-    Version 2.0: Builds one batch per individual record with all question context.
-    No chunking - each record is processed independently with complete question context.
+    if not question_records:
+        # One empty chunk -> the single-request, no-context path downstream.
+        return [[]]
+    if not budget or any(tc is None for tc in token_counts):
+        return [list(question_records)]
+
+    chunks = []
+    current, current_tokens = [], 0
+    for rec, tokens in zip(question_records, token_counts):
+        tokens = int(tokens)
+        if current and current_tokens + tokens > budget:
+            chunks.append(current)
+            current, current_tokens = [], 0
+        current.append(rec)
+        current_tokens += tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def build_batches(dataframes_dict, selected_job_name, allocation=None):
+    """
+    Version 2.1: Builds one batch per individual record. Each batch carries the
+    question context as a list of chunks. When the full question context fits a
+    single request (the common case) there is exactly one chunk and behaviour is
+    identical to 2.0; when the allocator reports the context must be split, the
+    rows are packed into multiple chunks so the record can be run against each
+    chunk and the answers stitched downstream.
 
     Args:
         dataframes_dict (dict): Contains all preprocessed data including records and question context.
         selected_job_name (str): The name of the job currently being processed.
+        allocation (dict): The allocate_context() result; its Context_Budget_Per_Chunk
+            drives chunk packing. If omitted, the whole context is one chunk.
 
     Returns:
         pd.DataFrame: A DataFrame of batches (one per record) ready to be processed.
@@ -40,16 +75,29 @@ def build_batches(dataframes_dict, selected_job_name):
             logger.log(LogLevel.ERROR, "No record context dataframes found.", source_file="batch_builder.py")
             return pd.DataFrame()
 
-        # Collect all question context (we'll send ALL of it with each record)
+        # Collect all question context (we'll send ALL of it with each record),
+        # keeping each row's pre-computed token count so it can be packed into
+        # budget-sized chunks.
         all_question_context = []
+        all_question_token_counts = []
         for df_name, df in dataframes_dict.items():
             if df_name.startswith('Question_Context_') and not df.empty:
                 # Filter out metadata columns (source_file, json, token_count)
                 question_cols = [col for col in df.columns if col not in ['source_file', 'json', 'token_count']]
                 question_records = df[question_cols].to_dict('records')
                 all_question_context.extend(question_records)
+                if 'token_count' in df.columns:
+                    all_question_token_counts.extend(df['token_count'].tolist())
+                else:
+                    all_question_token_counts.extend([None] * len(question_records))
 
-        # Create response format (same for all batches since we send all question context)
+        # Pack the question context into chunks. One chunk == the full context in a
+        # single request (unchanged 2.0 behaviour); more than one means it will be
+        # split across requests and stitched.
+        budget = (allocation or {}).get('Context_Budget_Per_Chunk')
+        question_context_chunks = _pack_chunks(all_question_context, all_question_token_counts, budget)
+
+        # Create response format (same for all batches since the schema is fixed)
         response_format = create_response_format(dataframes_dict, selected_job_name)
 
         # Build batches - one per record
@@ -68,7 +116,7 @@ def build_batches(dataframes_dict, selected_job_name):
                     "record_data": record_data,  # The actual record as a dict
                     "record_json": row['json'],  # Pre-computed JSON string
                     "source_file": row.get('source_file', 'unknown'),
-                    "question_context": all_question_context,  # ALL question context
+                    "question_context_chunks": question_context_chunks,  # list[list[dict]]
                     "response_format": response_format,
                     "system_role": system_role
                 }
@@ -78,8 +126,11 @@ def build_batches(dataframes_dict, selected_job_name):
         # Convert to DataFrame
         batches_df = pd.DataFrame(batch_rows)
 
-        logger.log(LogLevel.INFO, f"Built {len(batches_df)} batches (one per record)")
-        print(f"Built {len(batches_df)} batches (one per record)")
+        num_chunks = len(question_context_chunks)
+        logger.log(LogLevel.INFO,
+                   f"Built {len(batches_df)} batches (one per record), "
+                   f"{num_chunks} question-context chunk(s) per record")
+        print(f"Built {len(batches_df)} batches (one per record), {num_chunks} context chunk(s) each")
 
         return batches_df
 

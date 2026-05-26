@@ -86,6 +86,27 @@ def _load_pricing():
     return _read_table(PRICING_PATH)
 
 
+def _context_window_for(model, pricing_df):
+    """Return the model's input context window from API_Pricing.csv's
+    Context_Window column, or DEFAULT_INPUT_CONTEXT_LIMIT if the column is
+    absent or the value is missing/unparseable. This lets the generated
+    Input_Context_Limit track each model's real window (e.g. gpt-5.4's large
+    window) instead of a flat default.
+    """
+    if pricing_df is None or 'Context_Window' not in pricing_df or 'Model' not in pricing_df:
+        return DEFAULT_INPUT_CONTEXT_LIMIT
+    match = pricing_df[pricing_df['Model'].astype(str) == str(model)]
+    if match.empty:
+        return DEFAULT_INPUT_CONTEXT_LIMIT
+    raw = match['Context_Window'].values[0]
+    if pd.isna(raw) or str(raw).strip() == '':
+        return DEFAULT_INPUT_CONTEXT_LIMIT
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_INPUT_CONTEXT_LIMIT
+
+
 def default_job_params(model, pricing_df=None):
     """Resolve job-config defaults, validating the model against API_Pricing.csv
     and choosing a temperature compatible with that model.
@@ -102,7 +123,7 @@ def default_job_params(model, pricing_df=None):
 
     return {
         'Model': chosen_model,
-        'Input_Context_Limit': DEFAULT_INPUT_CONTEXT_LIMIT,
+        'Input_Context_Limit': _context_window_for(chosen_model, pricing_df),
         'Input_Context_Overhead': DEFAULT_INPUT_CONTEXT_OVERHEAD,
         'Output_Context_Limit': DEFAULT_OUTPUT_CONTEXT_LIMIT,
         'Temperature': temperature,

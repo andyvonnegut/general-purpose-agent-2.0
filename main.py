@@ -148,7 +148,7 @@ def main():
 
         # Step 6: Build batches (one per record, all with full question context)
         logger.log(LogLevel.INFO, "Building batches...")
-        batches_df = build_batches(dataframes_dict, selected_job_name)
+        batches_df = build_batches(dataframes_dict, selected_job_name, allocation=context_allocation)
 
         if not batches_df.empty:
             logger.log(LogLevel.INFO, f"Batch building complete. {len(batches_df)} batches created (one per record).")

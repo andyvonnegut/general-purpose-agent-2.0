@@ -108,7 +108,8 @@ async def process_batches(
                       source_file="batch_processor.py", function_name="process_batches")
             return {}
 
-        result_columns = job_questions['Key'].tolist() + ['source_file', 'batch_id']
+        question_keys = job_questions['Key'].tolist()
+        result_columns = question_keys + ['source_file', 'batch_id']
 
         # Load the API key
         my_api_key = load_api_key()
@@ -176,197 +177,206 @@ async def process_batches(
                 'total': in_cost + out_cost,
             }
 
+        def build_messages(system_content, record_json_str, question_context):
+            """Single-request message scaffolding: a record plus (optionally) a
+            slice of question context. Identical to the 2.0 layout."""
+            messages = [
+                {"role": "developer", "content": system_content},
+                {"role": "user", "content": "Here is the record I want reviewed. Provide a detailed response."},
+                {"role": "user", "content": f"[{record_json_str}]"},
+            ]
+            if question_context and len(question_context) > 0:
+                messages.append({"role": "developer", "content": "Here is information you can use to help create your response:"})
+                messages.append({"role": "developer", "content": json.dumps(question_context)})
+            return messages
+
+        def build_reduce_messages(system_content, record_json_str, partial_answers):
+            """Reduce-step scaffolding: consolidate per-chunk answers for the same
+            record into one final answer using the same output schema."""
+            return [
+                {"role": "developer", "content": system_content},
+                {"role": "user", "content": "Here is the record I want reviewed. Provide a detailed response."},
+                {"role": "user", "content": f"[{record_json_str}]"},
+                {"role": "developer", "content": (
+                    "The reference data was too large to send at once, so this record was evaluated "
+                    "against several slices of it separately. Below are the partial answers, one per "
+                    "slice, for THIS SAME record. Consolidate them into a single final answer in the "
+                    "required schema: union any matches (e.g. combine multiple matching IDs), drop "
+                    "non-matches such as 'No Match' whenever a real match exists, and reconcile any "
+                    "conflicts into the single best answer.")},
+                {"role": "developer", "content": json.dumps(partial_answers)},
+            ]
+
+        def deterministic_union(partial_answers):
+            """Fallback stitch if the reduce call fails: per answer field, union the
+            non-empty, non-'No Match' values across chunks, de-duplicated and joined."""
+            merged = {}
+            for key in question_keys:
+                seen, values = set(), []
+                for ans in partial_answers:
+                    val = ans.get(key, '')
+                    if val is None:
+                        continue
+                    text = str(val).strip()
+                    if text == '' or text.lower() == 'no match':
+                        continue
+                    if text not in seen:
+                        seen.add(text)
+                        values.append(text)
+                merged[key] = ', '.join(values)
+            return merged
+
+        async def invoke_model(messages, batch_id, response_format, source_file, status_label):
+            """Make one model call under the shared concurrency limit, parse it, log
+            the transcript, and accumulate cost. Returns the parsed `results` list,
+            or None when the call was skipped / failed / returned no results.
+            The semaphore wraps the individual call (not the whole record) so a
+            record split across chunks still respects max_parallel_requests."""
+            global shutdown_requested
+            nonlocal state
+
+            request_data = {
+                "model": model_name,
+                "temperature": temperature,
+                "source_file": source_file,
+                "messages": messages,
+            }
+
+            async with semaphore:
+                if shutdown_requested:
+                    return None
+                completion = await client.beta.chat.completions.parse(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    response_format=response_format,
+                )
+
+            cost_info = build_cost_info(completion)
+            async with state_lock:
+                state['total_cost'] += cost_info['total']
+                state['total_input_tokens'] += cost_info['input_tokens']
+                state['total_output_tokens'] += cost_info['output_tokens']
+
+            choice = completion.choices[0].message.content
+            try:
+                response_data = json.loads(choice)
+                results = response_data.get('results', [])
+            except (json.JSONDecodeError, TypeError):
+                logger.log(LogLevel.ERROR,
+                           f"Failed to parse response for batch {batch_id} ({status_label}). "
+                           f"Response: {(choice or '')[:500]}",
+                           source_file="batch_processor.py")
+                logger.log_api_call_complete(
+                    request_data, {"raw_content": (choice or "")[:5000]},
+                    cost_info, batch_id=batch_id, status='parse_error')
+                return None
+
+            status = status_label if results else 'empty_results'
+            logger.log_api_call_complete(
+                request_data, response_data, cost_info, batch_id=batch_id, status=status)
+            if not results:
+                logger.log(LogLevel.WARNING,
+                           f"Empty results for batch {batch_id} ({status_label}).",
+                           source_file="batch_processor.py")
+                return None
+            return results
+
         async def process_single_batch(batch_row):
-            """Process a single batch (one record)"""
+            """Process one record. One context chunk == a single call (unchanged);
+            multiple chunks == one call per chunk plus a reduce call that stitches
+            the partial answers into the single output row written for the record."""
             global shutdown_requested
             nonlocal state
 
             if shutdown_requested:
                 return
 
-            async with semaphore:
-                if shutdown_requested:
-                    return
+            batch_id = batch_row['batch_id']
+            source_file = batch_row.get('source_file', 'unknown')
 
-                batch_id = batch_row['batch_id']
+            async with state_lock:
+                state['in_flight'] += 1
+                current_completed = state['completed']
+                current_failed = state['failed']
+                current_in_flight = state['in_flight']
+            print(f"Processing: {current_completed}/{total_batches} complete, "
+                  f"{current_failed} failed, {current_in_flight} in-flight")
 
-                async with state_lock:
-                    state['in_flight'] += 1
-                    current_completed = state['completed']
-                    current_failed = state['failed']
-                    current_in_flight = state['in_flight']
+            failed = False
+            try:
+                system_content = json.loads(batch_row['system_role'])['content']
+                record_json_str = batch_row['record_json']
+                response_format = batch_row['response_format']
+                chunks = batch_row['question_context_chunks']
 
-                print(f"Processing: {current_completed}/{total_batches} complete, "
-                      f"{current_failed} failed, {current_in_flight} in-flight")
-
-                try:
-                    # Build messages
-                    system_role_data = json.loads(batch_row['system_role'])
-                    record_json_str = batch_row['record_json']
-                    question_context = batch_row['question_context']
-                    response_format = batch_row['response_format']
-
-                    # Build the API messages
-                    if question_context and len(question_context) > 0:
-                        messages = [
-                            {"role": "developer", "content": system_role_data['content']},
-                            {"role": "user", "content": "Here is the record I want reviewed. Provide a detailed response."},
-                            {"role": "user", "content": f"[{record_json_str}]"},
-                            {"role": "developer", "content": "Here is information you can use to help create your response:"},
-                            {"role": "developer", "content": json.dumps(question_context)},
-                        ]
-                    else:
-                        messages = [
-                            {"role": "developer", "content": system_role_data['content']},
-                            {"role": "user", "content": "Here is the record I want reviewed. Provide a detailed response."},
-                            {"role": "user", "content": f"[{record_json_str}]"},
-                        ]
-
-                    # Request payload captured for the per-record transcript
-                    # (Logs/api_calls/api_calls.csv via log_api_call_complete).
-                    request_data = {
-                        "model": model_name,
-                        "temperature": temperature,
-                        "source_file": batch_row.get('source_file', ''),
-                        "messages": messages,
-                    }
-
-                    # Make API call
-                    completion = await client.beta.chat.completions.parse(
-                        model=model_name,
-                        messages=messages,
-                        temperature=temperature,
-                        response_format=response_format
-                    )
-
-                    # Log detailed API response for debugging
-                    logger.log(LogLevel.DEBUG,
-                              f"Batch {batch_id} - API Response: "
-                              f"finish_reason={completion.choices[0].finish_reason}, "
-                              f"refusal={getattr(completion.choices[0].message, 'refusal', None)}, "
-                              f"content_length={len(completion.choices[0].message.content) if completion.choices[0].message.content else 0}",
-                              source_file="batch_processor.py")
-
-                    # Extract response
-                    choice = completion.choices[0].message.content
-
-                    # Parse response
-                    try:
-                        response_data = json.loads(choice)
-                        results = response_data.get('results', [])
-                    except json.JSONDecodeError:
-                        logger.log(LogLevel.ERROR, f"Failed to parse response for batch {batch_id}. Response: {choice[:500]}",
-                                  source_file="batch_processor.py")
-                        logger.log_api_call_complete(
-                            request_data, {"raw_content": (choice or "")[:5000]},
-                            build_cost_info(completion), batch_id=batch_id, status='parse_error')
-                        async with state_lock:
-                            state['failed'] += 1
-                            state['in_flight'] -= 1
-                        return
-
+                if len(chunks) <= 1:
+                    # Single request — full (or empty) context in one call.
+                    context = chunks[0] if chunks else []
+                    results = await invoke_model(
+                        build_messages(system_content, record_json_str, context),
+                        batch_id, response_format, source_file, status_label='success')
                     if not results:
-                        # Handle response_format which may be dict or string
-                        if isinstance(response_format, str):
-                            response_format_dict = json.loads(response_format)
-                        else:
-                            response_format_dict = response_format
-
-                        # Log full details for debugging
-                        debug_info = {
-                            'batch_id': batch_id,
-                            'finish_reason': completion.choices[0].finish_reason,
-                            'refusal': getattr(completion.choices[0].message, 'refusal', None),
-                            'response_data': response_data,
-                            'record_preview': record_json_str[:200],
-                            'response_format_name': response_format_dict.get('json_schema', {}).get('name', 'unknown'),
-                            'usage': {
-                                'prompt_tokens': completion.usage.prompt_tokens,
-                                'completion_tokens': completion.usage.completion_tokens
-                            }
-                        }
+                        failed = True
+                        return
+                    final_answer = results[0]
+                else:
+                    # Fan out: run the record against each context chunk concurrently.
+                    chunk_results = await asyncio.gather(*[
+                        invoke_model(
+                            build_messages(system_content, record_json_str, chunk),
+                            batch_id, response_format, source_file, status_label='partial')
+                        for chunk in chunks
+                    ])
+                    partial_answers = [r[0] for r in chunk_results if r]
+                    if not partial_answers:
                         logger.log(LogLevel.ERROR,
-                                  f"Empty results for batch {batch_id}. Details: {json.dumps(debug_info, indent=2)}",
-                                  source_file="batch_processor.py")
-
-                        # Save full request/response to debug file
-                        debug_folder = f"Logs/debug/{selected_job_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        os.makedirs(debug_folder, exist_ok=True)
-                        with open(f"{debug_folder}/batch_{batch_id}_empty_results.json", 'w') as f:
-                            json.dump({
-                                'messages': messages,
-                                'response_format': response_format_dict,
-                                'completion': {
-                                    'content': completion.choices[0].message.content,
-                                    'finish_reason': completion.choices[0].finish_reason,
-                                    'refusal': getattr(completion.choices[0].message, 'refusal', None)
-                                }
-                            }, f, indent=2)
-
-                        logger.log_api_call_complete(
-                            request_data, response_data,
-                            build_cost_info(completion), batch_id=batch_id, status='empty_results')
-                        async with state_lock:
-                            state['failed'] += 1
-                            state['in_flight'] -= 1
+                                   f"All {len(chunks)} context chunks failed for batch {batch_id}.",
+                                   source_file="batch_processor.py")
+                        failed = True
                         return
 
-                    # Calculate cost
-                    cost_info = build_cost_info(completion)
-                    total_cost = cost_info['total']
+                    # Reduce: consolidate the partial answers into one final answer.
+                    reduce_results = await invoke_model(
+                        build_reduce_messages(system_content, record_json_str, partial_answers),
+                        batch_id, response_format, source_file, status_label='success')
+                    if reduce_results:
+                        final_answer = reduce_results[0]
+                    else:
+                        logger.log(LogLevel.WARNING,
+                                   f"Reduce step failed for batch {batch_id}; "
+                                   f"falling back to deterministic union of {len(partial_answers)} chunk answers.",
+                                   source_file="batch_processor.py")
+                        final_answer = deterministic_union(partial_answers)
 
-                    # Persist the full prompt + parsed answer for this record so it
-                    # is retrievable later via the transcript MCP tools.
-                    logger.log_api_call_complete(
-                        request_data, response_data, cost_info,
-                        batch_id=batch_id, status='success')
+                # One result row per record (preserves the row-position join downstream).
+                result_row = {
+                    column: sanitize_csv_value(final_answer.get(column, ''))
+                    for column in result_columns
+                }
+                result_row['source_file'] = sanitize_csv_value(source_file)
+                result_row['batch_id'] = batch_id
 
-                    # Append to results (exactly what the model returns - single result item)
-                    raw_result_row = results[0] if len(results) > 0 else {}
-                    result_row = {
-                        column: sanitize_csv_value(raw_result_row.get(column, ''))
-                        for column in result_columns
-                    }
+                async with csv_lock:
+                    results_df = pd.DataFrame([result_row], columns=result_columns)
+                    if not state['csv_file_initialized']:
+                        results_df.to_csv(output_file, index=False, mode='w')
+                        state['csv_file_initialized'] = True
+                    else:
+                        results_df.to_csv(output_file, index=False, mode='a', header=False)
 
-                    # Add metadata
-                    result_row['source_file'] = sanitize_csv_value(batch_row['source_file'])
-                    result_row['batch_id'] = batch_id
-
-                    # Write to CSV (thread-safe)
-                    async with csv_lock:
-                        # Initialize CSV if needed
-                        if not state['csv_file_initialized']:
-                            results_df = pd.DataFrame([result_row], columns=result_columns)
-                            results_df.to_csv(output_file, index=False, mode='w')
-                            state['csv_file_initialized'] = True
-                        else:
-                            # Append to existing CSV
-                            results_df = pd.DataFrame([result_row], columns=result_columns)
-                            results_df.to_csv(output_file, index=False, mode='a', header=False)
-
-                    # Update state
-                    async with state_lock:
-                        state['completed'] += 1
-                        state['in_flight'] -= 1
-                        state['total_cost'] += cost_info['total']
-                        state['total_input_tokens'] += cost_info['input_tokens']
-                        state['total_output_tokens'] += cost_info['output_tokens']
-
-                except Exception as e:
-                    import traceback
-                    error_details = traceback.format_exc()
-                    logger.log(LogLevel.ERROR, f"Error processing batch {batch_id}: {str(e)}\n{error_details}",
-                              source_file="batch_processor.py")
-                    try:
-                        logger.log_api_call_complete(
-                            locals().get('request_data', {}), {"error": str(e)},
-                            build_cost_info(locals().get('completion')),
-                            batch_id=batch_id, status='error')
-                    except Exception:
-                        pass
-                    async with state_lock:
+            except Exception as e:
+                import traceback
+                logger.log(LogLevel.ERROR, f"Error processing batch {batch_id}: {str(e)}\n{traceback.format_exc()}",
+                          source_file="batch_processor.py")
+                failed = True
+            finally:
+                async with state_lock:
+                    if failed:
                         state['failed'] += 1
-                        state['in_flight'] -= 1
+                    else:
+                        state['completed'] += 1
+                    state['in_flight'] -= 1
 
         # Create tasks for all batches
         tasks = []

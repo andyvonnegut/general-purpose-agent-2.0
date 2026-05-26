@@ -130,7 +130,7 @@ async def run_job(job_name, max_parallel_requests=50, max_records=None):
                 "configured token limit, or the job config is invalid."
             )
 
-        batches_df = build_batches(dataframes_dict, job_name)
+        batches_df = build_batches(dataframes_dict, job_name, allocation=allocation)
         if batches_df is None or batches_df.empty:
             raise PipelineError("No batches were created (no records or build error).")
 

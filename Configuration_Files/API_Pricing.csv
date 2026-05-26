@@ -1,36 +1,44 @@
-Model,Input_Cost_Per_Million,Cached_Input_Cost_Per_Million,Output_Cost_Per_Million,Supported_Temperatures
-gpt-5.4,2.5,0.25,15.00,1 (default only)
-gpt-5,1.25,0.125,10.00,1 (default only)
-gpt-5-2025-08-07,1.25,0.125,10.00,1 (default only)
-gpt-5-mini,0.25,0.025,2.00,1 (default only)
-gpt-5-nano,0.05,0.005,0.40,1 (default only)
-gpt-5-chat-latest,1.25,0.125,10.00,1 (default only)
-gpt-5-codex,1.25,0.125,10.00,1 (default only)
-gpt-5-pro,15.00,,120.00,1 (default only)
-gpt-4.1,2.00,0.50,8.00,0-2
-gpt-4.1-mini,0.40,0.10,1.60,0-2
-gpt-4.1-nano,0.10,0.025,0.40,0-2
-gpt-4o,2.50,1.25,10.00,0-2
-gpt-4o-2024-05-13,5.00,,15.00,0-2
-gpt-4o-2024-08-06,5.00,,15.00,0-2
-gpt-4o-mini,0.15,0.075,0.60,0-2
-gpt-realtime,4.00,0.40,16.00,1 (default only)
-gpt-realtime-mini,0.60,0.06,2.40,1 (default only)
-gpt-4o-realtime-preview,5.00,2.50,20.00,1 (default only)
-gpt-4o-mini-realtime-preview,0.60,0.30,2.40,1 (default only)
-gpt-audio,2.50,,10.00,1 (default only)
-gpt-audio-mini,0.60,,2.40,1 (default only)
-gpt-4o-audio-preview,2.50,,10.00,1 (default only)
-gpt-4o-mini-audio-preview,0.15,,0.60,1 (default only)
-o1,15.00,7.50,60.00,1 (default only)
-o1-pro,150.00,,600.00,1 (default only)
-o3-pro,20.00,,80.00,1 (default only)
-o3,2.00,0.50,8.00,1 (default only)
-o3-deep-research,10.00,2.50,40.00,1 (default only)
-o4-mini,1.10,0.275,4.40,1 (default only)
-o4-mini-deep-research,2.00,0.50,8.00,1 (default only)
-o3-mini,1.10,0.55,4.40,1 (default only)
-o1-mini,1.10,0.55,4.40,1 (default only)
-codex-mini-latest,1.50,0.375,6.00,0-2
-gpt-4o-mini-search-preview,0.15,,0.60,0-2
-gpt-4o-search-preview,2.50,,10.00,0-2
+Model,Input_Cost_Per_Million,Cached_Input_Cost_Per_Million,Output_Cost_Per_Million,Supported_Temperatures,Context_Window
+gpt-5.5,5.00,0.50,30.00,1 (default only),512000
+gpt-5.5-pro,30.00,,180.00,1 (default only),512000
+gpt-5.4,2.5,0.25,15.00,1 (default only),512000
+gpt-5.4-mini,0.75,0.075,4.50,1 (default only),512000
+gpt-5.4-nano,0.20,0.02,1.25,1 (default only),512000
+gpt-5.4-pro,30.00,,180.00,1 (default only),512000
+gpt-5.2,1.75,0.175,14.00,1 (default only),512000
+gpt-5.2-pro,21.00,,168.00,1 (default only),512000
+gpt-5.1,1.25,0.125,10.00,1 (default only),512000
+gpt-5,1.25,0.125,10.00,1 (default only),400000
+gpt-5-2025-08-07,1.25,0.125,10.00,1 (default only),400000
+gpt-5-mini,0.25,0.025,2.00,1 (default only),400000
+gpt-5-nano,0.05,0.005,0.40,1 (default only),400000
+gpt-5-chat-latest,1.25,0.125,10.00,1 (default only),400000
+gpt-5-codex,1.25,0.125,10.00,1 (default only),400000
+gpt-5-pro,15.00,,120.00,1 (default only),400000
+gpt-4.1,2.00,0.50,8.00,0-2,1047576
+gpt-4.1-mini,0.40,0.10,1.60,0-2,1047576
+gpt-4.1-nano,0.10,0.025,0.40,0-2,1047576
+gpt-4o,2.50,1.25,10.00,0-2,128000
+gpt-4o-2024-05-13,5.00,,15.00,0-2,128000
+gpt-4o-2024-08-06,5.00,,15.00,0-2,128000
+gpt-4o-mini,0.15,0.075,0.60,0-2,128000
+gpt-realtime,4.00,0.40,16.00,1 (default only),128000
+gpt-realtime-mini,0.60,0.06,2.40,1 (default only),128000
+gpt-4o-realtime-preview,5.00,2.50,20.00,1 (default only),128000
+gpt-4o-mini-realtime-preview,0.60,0.30,2.40,1 (default only),128000
+gpt-audio,2.50,,10.00,1 (default only),128000
+gpt-audio-mini,0.60,,2.40,1 (default only),128000
+gpt-4o-audio-preview,2.50,,10.00,1 (default only),128000
+gpt-4o-mini-audio-preview,0.15,,0.60,1 (default only),128000
+o1,15.00,7.50,60.00,1 (default only),200000
+o1-pro,150.00,,600.00,1 (default only),200000
+o3-pro,20.00,,80.00,1 (default only),200000
+o3,2.00,0.50,8.00,1 (default only),200000
+o3-deep-research,10.00,2.50,40.00,1 (default only),200000
+o4-mini,1.10,0.275,4.40,1 (default only),200000
+o4-mini-deep-research,2.00,0.50,8.00,1 (default only),200000
+o3-mini,1.10,0.55,4.40,1 (default only),200000
+o1-mini,1.10,0.55,4.40,1 (default only),128000
+codex-mini-latest,1.50,0.375,6.00,0-2,200000
+gpt-4o-mini-search-preview,0.15,,0.60,0-2,128000
+gpt-4o-search-preview,2.50,,10.00,0-2,128000

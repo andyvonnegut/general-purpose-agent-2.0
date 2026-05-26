@@ -2,7 +2,14 @@ import pandas as pd
 import tiktoken
 from unified_logger import get_logger, LogLevel
 import json
+import math
 import os
+
+# Fixed token allowance for the static prompt scaffolding (developer/role
+# framing, the per-request instruction lines, and response slack) that sits
+# around the record + question context. Subtracted from the available context
+# when sizing chunks so a packed chunk plus its wrapper does not overflow.
+SCAFFOLD_MARGIN = 1500
 
 def allocate_context(dataframes_dict, selected_job_name):
     """
@@ -50,6 +57,10 @@ def allocate_context(dataframes_dict, selected_job_name):
 
         # Calculate total question context tokens (we'll send ALL of this with each record)
         question_context_tokens = 0
+        # Largest single question-context row. A chunk must hold at least one row,
+        # so this is the smallest amount of context any request can carry and thus
+        # governs whether the data can be made to fit by splitting at all.
+        max_question_row_tokens = 0
         empty_json_token_count = len(tokenizer.encode('[]'))
 
         # Add JSON strings & token counts to all dataframes
@@ -80,6 +91,8 @@ def allocate_context(dataframes_dict, selected_job_name):
             # Sum up all question context tokens (we send ALL of these with each record)
             if df_name.startswith('Question_Context_') or df_name.startswith('GPA_Questions'):
                 question_context_tokens += df['token_count'].sum()
+                if len(token_counts) > 0:
+                    max_question_row_tokens = max(max_question_row_tokens, max(token_counts))
 
         # Add token count for JSON array brackets around question context
         num_question_context_dataframes = sum(1 for df_name in dataframes_dict.keys()
@@ -92,77 +105,77 @@ def allocate_context(dataframes_dict, selected_job_name):
         logger.log(LogLevel.INFO, f"Total Question Context Tokens (sent with EVERY record): {question_context_tokens}")
         print(f"Total Question Context Tokens (sent with EVERY record): {question_context_tokens}")
 
-        # Validate that each record + all question context fits within available context
+        # Find the largest record. We size chunks against the largest record so a
+        # single chunking plan is valid for every record (simple and conservative).
         max_record_tokens = 0
         total_records = 0
-        records_exceeding_limit = []
 
         for df_name, df in dataframes_dict.items():
             if not df_name.startswith('Record_Context_'):
                 continue
-
             if df.empty:
                 continue
-
             total_records += len(df)
-
-            # Check each record
             for idx, row in df.iterrows():
                 record_tokens = row['token_count'] + empty_json_token_count  # Account for array brackets
                 max_record_tokens = max(max_record_tokens, record_tokens)
 
-                # Calculate total tokens for this record + all question context
-                total_tokens_for_request = record_tokens + question_context_tokens
+        # Per-request budget left for question context once the (largest) record
+        # and a fixed allowance for the static prompt scaffolding are accounted for.
+        ctx_budget = available_context - max_record_tokens - SCAFFOLD_MARGIN
 
-                if total_tokens_for_request > available_context:
-                    records_exceeding_limit.append({
-                        'source_file': row.get('source_file', df_name),
-                        'record_tokens': record_tokens,
-                        'question_tokens': question_context_tokens,
-                        'total_tokens': total_tokens_for_request,
-                        'available_context': available_context
-                    })
-
-        if records_exceeding_limit:
-            error_msg = f"\n{'='*80}\nERROR: {len(records_exceeding_limit)} record(s) exceed token limit!\n{'='*80}\n"
-            error_msg += f"Available context: {available_context} tokens\n"
-            error_msg += f"Question context (sent with every record): {question_context_tokens} tokens\n"
-            error_msg += f"Maximum tokens per record available: {available_context - question_context_tokens} tokens\n\n"
-            error_msg += "Records exceeding limit:\n"
-            for i, record in enumerate(records_exceeding_limit[:5], 1):  # Show first 5
-                error_msg += f"{i}. Source: {record['source_file']}, Record: {record['record_tokens']} tokens, "
-                error_msg += f"Total: {record['total_tokens']} tokens (exceeds by {record['total_tokens'] - available_context})\n"
-
-            if len(records_exceeding_limit) > 5:
-                error_msg += f"... and {len(records_exceeding_limit) - 5} more\n"
-
-            error_msg += f"\nSolutions:\n"
-            error_msg += f"1. Increase Input_Context_Limit in job configuration\n"
-            error_msg += f"2. Reduce Input_Context_Overhead\n"
-            error_msg += f"3. Reduce the size of your question context examples\n"
-            error_msg += f"4. Simplify/reduce the input data records\n"
-            error_msg += "="*80
-
-            logger.log(LogLevel.ERROR, error_msg, source_file="context_allocator.py")
-            print(error_msg)
+        # Feasibility: the smallest possible request is one record + one (largest)
+        # question-context row. If even that doesn't fit, no amount of splitting
+        # helps -> this is the genuinely-invalid case the caller turns into a
+        # PipelineError.
+        if max_record_tokens > available_context:
+            logger.log(LogLevel.ERROR,
+                       f"Largest record ({max_record_tokens} tokens) alone exceeds available "
+                       f"context ({available_context}). Increase Input_Context_Limit or reduce the record.",
+                       source_file="context_allocator.py")
+            return {}
+        if question_context_tokens > 0 and ctx_budget < max_question_row_tokens:
+            logger.log(LogLevel.ERROR,
+                       f"A single question-context row ({max_question_row_tokens} tokens) cannot fit "
+                       f"alongside the largest record. Budget per chunk is {ctx_budget} tokens. "
+                       f"Increase Input_Context_Limit, reduce Input_Context_Overhead, or shrink the records.",
+                       source_file="context_allocator.py")
             return {}
 
-        # Success! All records fit
-        logger.log(LogLevel.INFO, f"Validation successful: All {total_records} records fit within token limits")
-        logger.log(LogLevel.INFO, f"Largest record: {max_record_tokens} tokens")
-        logger.log(LogLevel.INFO, f"Max tokens per request: {max_record_tokens + question_context_tokens} tokens")
+        # Decide how many context chunks each record must be run against. One chunk
+        # == today's behaviour (whole context in a single request); >1 means the
+        # record is run per-chunk and the answers are stitched downstream.
+        if question_context_tokens <= ctx_budget:
+            num_context_chunks = 1
+        else:
+            num_context_chunks = math.ceil(question_context_tokens / ctx_budget)
+
+        if num_context_chunks > 1:
+            logger.log(LogLevel.INFO,
+                       f"Question context ({question_context_tokens} tokens) exceeds the per-record "
+                       f"budget ({ctx_budget}); it will be split into {num_context_chunks} chunks and "
+                       f"the per-chunk answers stitched together.",
+                       source_file="context_allocator.py")
+            print(f"Splitting question context into {num_context_chunks} chunks "
+                  f"(budget {ctx_budget} tokens/chunk).")
+        else:
+            logger.log(LogLevel.INFO, f"Validation successful: All {total_records} records fit "
+                       f"with the full question context in a single request.")
 
         print(f"\nValidation successful!")
         print(f"Total records to process: {total_records}")
         print(f"Largest record: {max_record_tokens} tokens")
-        print(f"Max tokens per request: {max_record_tokens + question_context_tokens} tokens")
+        print(f"Question context: {question_context_tokens} tokens")
         print(f"Available context: {available_context} tokens")
+        print(f"Context chunks per record: {num_context_chunks}")
 
         context_allocation = {
             'Total_Question_Context_Tokens': question_context_tokens,
             'Max_Record_Tokens': max_record_tokens,
             'Available_Context': available_context,
-            'Total_Records': total_records
+            'Total_Records': total_records,
+            'Num_Context_Chunks': num_context_chunks,
+            'Context_Budget_Per_Chunk': ctx_budget,
         }
 
         # Write debugging output to testing/ folder
