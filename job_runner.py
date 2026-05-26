@@ -81,11 +81,12 @@ def stage_input_files(record_paths, question_context_paths=None, clean=True):
     _copy_files(question_context_paths, QUESTION_CONTEXT_DIR)
 
 
-async def run_job(job_name, max_parallel_requests=50):
+async def run_job(job_name, max_parallel_requests=50, max_records=None):
     """Run the pipeline for an already-staged job. Returns a summary dict.
 
     Raises PipelineError on job-not-found, context-validation failure, or when
-    no batches are produced.
+    no batches are produced. If max_records is set, only the first N records are
+    processed (one batch == one record), used for previews.
     """
     logger = get_logger(job_name)
     run_id = logger.session_id
@@ -133,6 +134,9 @@ async def run_job(job_name, max_parallel_requests=50):
         if batches_df is None or batches_df.empty:
             raise PipelineError("No batches were created (no records or build error).")
 
+        if max_records:
+            batches_df = batches_df.head(max_records)
+
         summary = await process_batches(
             batches_df, dataframes_dict, job_name, logger,
             max_parallel_requests=max_parallel_requests,
@@ -152,7 +156,7 @@ async def run_job(job_name, max_parallel_requests=50):
     return result
 
 
-def run_job_sync(job_name, max_parallel_requests=50):
+def run_job_sync(job_name, max_parallel_requests=50, max_records=None):
     """Synchronous wrapper around run_job for non-async (MCP tool) callers.
     Runs in a dedicated thread with its own event loop, so this works whether
     the caller is in an existing event loop (e.g. an async MCP framework) or
@@ -164,7 +168,8 @@ def run_job_sync(job_name, max_parallel_requests=50):
         loop = asyncio.new_event_loop()
         try:
             box["result"] = loop.run_until_complete(
-                run_job(job_name, max_parallel_requests=max_parallel_requests)
+                run_job(job_name, max_parallel_requests=max_parallel_requests,
+                        max_records=max_records)
             )
         except BaseException as exc:
             box["error"] = exc

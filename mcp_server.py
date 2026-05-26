@@ -75,6 +75,44 @@ def list_jobs() -> dict:
 
 
 @mcp.tool()
+def list_models() -> dict:
+    """List the models available for jobs, read from Configuration_Files/API_Pricing.csv.
+
+    Returns each model's id and per-million-token input/output costs and the
+    temperatures it supports, in the CSV's original order (the canonical list a
+    caller can present as a model picklist).
+    """
+    try:
+        import math
+
+        def _num(v):
+            try:
+                f = float(v)
+                return None if math.isnan(f) else f
+            except (TypeError, ValueError):
+                return None
+
+        df = schema_generator._load_pricing()
+        models = []
+        for _, r in df.iterrows():
+            name = str(r.get('Model', '')).strip()
+            if not name or name.lower() == 'nan':
+                continue
+            models.append({
+                "name": name,
+                "input_cost_per_million": _num(r.get('Input_Cost_Per_Million')),
+                "output_cost_per_million": _num(r.get('Output_Cost_Per_Million')),
+                "supported_temperatures": (
+                    None if r.get('Supported_Temperatures') is None
+                    else str(r.get('Supported_Temperatures')).strip() or None
+                ),
+            })
+        return {"status": "ok", "default_model": schema_generator.DEFAULT_MODEL, "models": models}
+    except Exception as e:
+        return _error(e)
+
+
+@mcp.tool()
 def generate_job(
     prompt: str,
     file_paths: FilePaths,
@@ -118,6 +156,7 @@ def run_job(
     file_paths: FilePaths,
     max_parallel_requests: int = 50,
     question_context_paths: Optional[List[str]] = None,
+    max_records: Optional[int] = None,
 ) -> dict:
     """Run an existing named job over the dropped data file(s), record by record.
 
@@ -131,6 +170,7 @@ def run_job(
         max_parallel_requests: Max concurrent OpenAI requests (default 50).
         question_context_paths: Optional path(s) to example/context or enum
             reference files attached to every record.
+        max_records: If set, process only the first N records (used for previews).
 
     Returns the absolute results_path plus a summary: total_records, succeeded,
     failed, input_tokens, output_tokens, total_cost, duration_seconds.
@@ -141,7 +181,8 @@ def run_job(
             question_context_paths=question_context_paths,
             clean=True,
         )
-        summary = job_runner.run_job_sync(job_name, max_parallel_requests=max_parallel_requests)
+        summary = job_runner.run_job_sync(
+            job_name, max_parallel_requests=max_parallel_requests, max_records=max_records)
         summary["status"] = "completed"
         return summary
     except Exception as e:
@@ -155,12 +196,15 @@ def generate_and_run(
     model: Optional[str] = None,
     max_parallel_requests: int = 50,
     question_context_paths: Optional[List[str]] = None,
+    max_records: Optional[int] = None,
 ) -> dict:
     """End-to-end: from dropped file(s) + a prompt, generate and persist a job
     schema, then run it over the same file(s) and return the results path.
 
     Combines generate_job and run_job. The files are staged once. Returns the
     created job definition fields merged with the run summary (status=completed).
+    Pass max_records to process only the first N records (used for previews); the
+    persisted job can then be re-run by name over the full file via run_job.
     """
     try:
         # Stage first so the same files back both generation sampling and the run.
@@ -176,7 +220,8 @@ def generate_and_run(
             question_context_paths=question_context_paths,
         )
         summary = job_runner.run_job_sync(
-            created["job_name"], max_parallel_requests=max_parallel_requests
+            created["job_name"], max_parallel_requests=max_parallel_requests,
+            max_records=max_records,
         )
         result = {**created, **summary, "status": "completed"}
         return result
