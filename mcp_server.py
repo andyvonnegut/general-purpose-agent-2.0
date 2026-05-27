@@ -15,7 +15,9 @@ Contract: processes one job-run at a time (the underlying logger is a global
 singleton). Call serially.
 """
 
+import contextlib
 import os
+import sys
 import traceback
 from typing import List, Optional, Union
 
@@ -98,6 +100,7 @@ def list_models() -> dict:
             name = str(r.get('Model', '')).strip()
             if not name or name.lower() == 'nan':
                 continue
+            cw = _num(r.get('Context_Window'))
             models.append({
                 "name": name,
                 "input_cost_per_million": _num(r.get('Input_Cost_Per_Million')),
@@ -106,6 +109,7 @@ def list_models() -> dict:
                     None if r.get('Supported_Temperatures') is None
                     else str(r.get('Supported_Temperatures')).strip() or None
                 ),
+                "context_window": int(cw) if cw is not None else None,
             })
         return {"status": "ok", "default_model": schema_generator.DEFAULT_MODEL, "models": models}
     except Exception as e:
@@ -138,12 +142,16 @@ def generate_job(
     config files updated.
     """
     try:
-        result = job_runner.create_job_from_prompt(
-            prompt=prompt,
-            record_paths=file_paths,
-            model=model,
-            question_context_paths=question_context_paths,
-        )
+        # The engine prints progress to stdout, which is the JSON-RPC channel
+        # for this stdio MCP server. Redirect it to stderr so it doesn't corrupt
+        # the protocol stream the calling client reads.
+        with contextlib.redirect_stdout(sys.stderr):
+            result = job_runner.create_job_from_prompt(
+                prompt=prompt,
+                record_paths=file_paths,
+                model=model,
+                question_context_paths=question_context_paths,
+            )
         result["status"] = "created"
         return result
     except Exception as e:
@@ -176,13 +184,15 @@ def run_job(
     failed, input_tokens, output_tokens, total_cost, duration_seconds.
     """
     try:
-        job_runner.stage_input_files(
-            record_paths=file_paths,
-            question_context_paths=question_context_paths,
-            clean=True,
-        )
-        summary = job_runner.run_job_sync(
-            job_name, max_parallel_requests=max_parallel_requests, max_records=max_records)
+        # Keep engine stdout off the JSON-RPC channel (see generate_job).
+        with contextlib.redirect_stdout(sys.stderr):
+            job_runner.stage_input_files(
+                record_paths=file_paths,
+                question_context_paths=question_context_paths,
+                clean=True,
+            )
+            summary = job_runner.run_job_sync(
+                job_name, max_parallel_requests=max_parallel_requests, max_records=max_records)
         summary["status"] = "completed"
         return summary
     except Exception as e:
@@ -207,22 +217,24 @@ def generate_and_run(
     persisted job can then be re-run by name over the full file via run_job.
     """
     try:
-        # Stage first so the same files back both generation sampling and the run.
-        job_runner.stage_input_files(
-            record_paths=file_paths,
-            question_context_paths=question_context_paths,
-            clean=True,
-        )
-        created = job_runner.create_job_from_prompt(
-            prompt=prompt,
-            record_paths=file_paths,
-            model=model,
-            question_context_paths=question_context_paths,
-        )
-        summary = job_runner.run_job_sync(
-            created["job_name"], max_parallel_requests=max_parallel_requests,
-            max_records=max_records,
-        )
+        # Keep engine stdout off the JSON-RPC channel (see generate_job).
+        with contextlib.redirect_stdout(sys.stderr):
+            # Stage first so the same files back both generation sampling and the run.
+            job_runner.stage_input_files(
+                record_paths=file_paths,
+                question_context_paths=question_context_paths,
+                clean=True,
+            )
+            created = job_runner.create_job_from_prompt(
+                prompt=prompt,
+                record_paths=file_paths,
+                model=model,
+                question_context_paths=question_context_paths,
+            )
+            summary = job_runner.run_job_sync(
+                created["job_name"], max_parallel_requests=max_parallel_requests,
+                max_records=max_records,
+            )
         result = {**created, **summary, "status": "completed"}
         return result
     except Exception as e:

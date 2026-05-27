@@ -134,6 +134,10 @@ async def run_job(job_name, max_parallel_requests=50, max_records=None):
         if batches_df is None or batches_df.empty:
             raise PipelineError("No batches were created (no records or build error).")
 
+        # Full record count before any preview cap, so a capped (max_records)
+        # preview run can still report the full job size for cost estimation.
+        total_records_available = len(batches_df)
+
         if max_records:
             batches_df = batches_df.head(max_records)
 
@@ -141,6 +145,8 @@ async def run_job(job_name, max_parallel_requests=50, max_records=None):
             batches_df, dataframes_dict, job_name, logger,
             max_parallel_requests=max_parallel_requests,
         )
+        if isinstance(summary, dict):
+            summary['total_records_available'] = total_records_available
     except Exception as e:
         _record_history('error', error=str(e))
         raise

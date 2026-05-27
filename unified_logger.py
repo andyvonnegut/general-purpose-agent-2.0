@@ -6,6 +6,7 @@ Provides centralized logging with different levels and output formats.
 import os
 import csv
 import json
+import sys
 from datetime import datetime
 from enum import Enum
 
@@ -60,8 +61,9 @@ class UnifiedLogger:
 
         log_entry += f" - {message}"
 
-        # Print to console
-        print(log_entry)
+        # Print to console (stderr — stdout is reserved for the stdio MCP
+        # server's JSON-RPC stream and must not carry log text).
+        print(log_entry, file=sys.stderr)
 
         # Write to file if requested
         if to_file:
@@ -69,7 +71,7 @@ class UnifiedLogger:
                 with open(self.log_file, 'a', encoding='utf-8') as f:
                     f.write(log_entry + '\n')
             except Exception as e:
-                print(f"Warning: Could not write to log file: {e}")
+                print(f"Warning: Could not write to log file: {e}", file=sys.stderr)
 
         # Auto-append ERROR and CRITICAL logs to errors.csv
         if isinstance(level, LogLevel) and level in [LogLevel.ERROR, LogLevel.CRITICAL]:

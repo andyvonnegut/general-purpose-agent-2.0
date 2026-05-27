@@ -1,6 +1,7 @@
 import pandas as pd
 import tiktoken
 from unified_logger import get_logger, LogLevel
+from errors import PipelineError
 import json
 import math
 import os
@@ -41,7 +42,17 @@ def allocate_context(dataframes_dict, selected_job_name):
         selected_model = selected_job['Model'].values[0]
         input_context_limit = int(selected_job['Input_Context_Limit'].values[0])
         overhead_tokens = int(selected_job['Input_Context_Overhead'].values[0])
-        available_context = input_context_limit - overhead_tokens
+        # Reserve room for the model's output. Input_Context_Limit is the model's
+        # full window, shared between the prompt and the completion, so the per-
+        # request *input* budget must also subtract the output allowance. Without
+        # this the budget overstates what fits and OpenAI rejects the call at
+        # request time with context_length_exceeded even though local validation
+        # "passed".
+        try:
+            output_reserve = int(selected_job['Output_Context_Limit'].values[0])
+        except (KeyError, ValueError, TypeError):
+            output_reserve = 0
+        available_context = input_context_limit - overhead_tokens - output_reserve
 
         if available_context <= 0:
             logger.log(LogLevel.ERROR, "Available context is less than or equal to 0.", source_file="context_allocator.py")
@@ -129,18 +140,21 @@ def allocate_context(dataframes_dict, selected_job_name):
         # helps -> this is the genuinely-invalid case the caller turns into a
         # PipelineError.
         if max_record_tokens > available_context:
-            logger.log(LogLevel.ERROR,
-                       f"Largest record ({max_record_tokens} tokens) alone exceeds available "
-                       f"context ({available_context}). Increase Input_Context_Limit or reduce the record.",
-                       source_file="context_allocator.py")
-            return {}
+            msg = (f"Largest record ({max_record_tokens} tokens) alone exceeds the available "
+                   f"input budget ({available_context} tokens) for model '{selected_model}' "
+                   f"(window {input_context_limit}, overhead {overhead_tokens}, output reserve "
+                   f"{output_reserve}). Choose a larger-context model or reduce the record size.")
+            logger.log(LogLevel.ERROR, msg, source_file="context_allocator.py")
+            raise PipelineError(msg)
         if question_context_tokens > 0 and ctx_budget < max_question_row_tokens:
-            logger.log(LogLevel.ERROR,
-                       f"A single question-context row ({max_question_row_tokens} tokens) cannot fit "
-                       f"alongside the largest record. Budget per chunk is {ctx_budget} tokens. "
-                       f"Increase Input_Context_Limit, reduce Input_Context_Overhead, or shrink the records.",
-                       source_file="context_allocator.py")
-            return {}
+            msg = (f"A single question-context row ({max_question_row_tokens} tokens) cannot fit "
+                   f"alongside the largest record ({max_record_tokens} tokens) for model "
+                   f"'{selected_model}'. Per-chunk budget is {ctx_budget} tokens (available "
+                   f"{available_context}, total question context {question_context_tokens}). "
+                   f"Choose a larger-context model, reduce Input_Context_Overhead, or shrink the "
+                   f"context rows.")
+            logger.log(LogLevel.ERROR, msg, source_file="context_allocator.py")
+            raise PipelineError(msg)
 
         # Decide how many context chunks each record must be run against. One chunk
         # == today's behaviour (whole context in a single request); >1 means the
@@ -196,6 +210,10 @@ def allocate_context(dataframes_dict, selected_job_name):
 
         return context_allocation
 
+    except PipelineError:
+        # Already a clear, caller-facing diagnosis — let it propagate so the MCP
+        # tool surfaces the specifics rather than a generic "validation failed".
+        raise
     except Exception as e:
         logger.log(LogLevel.ERROR, f"Error occurred during context allocation: {str(e)}", source_file="context_allocator.py")
         return {}
