@@ -12,6 +12,14 @@ import os
 # when sizing chunks so a packed chunk plus its wrapper does not overflow.
 SCAFFOLD_MARGIN = 1500
 
+# The per-row token estimate (sum of each row's JSON) systematically undercounts
+# the assembled request: message framing, repeated keys, and serialization make
+# the real prompt run materially larger than the sum of the parts (observed
+# ~15-17% larger in practice). Size chunks against this fraction of the usable
+# window so a packed chunk still fits the model's real limit with headroom rather
+# than overflowing at request time. Lower = safer but more (costlier) chunks.
+CONTEXT_SAFETY_FRACTION = 0.85
+
 def allocate_context(dataframes_dict, selected_job_name):
     """
     Version 2.0: Validates that a single record + all question context fits within token limits.
@@ -65,6 +73,23 @@ def allocate_context(dataframes_dict, selected_job_name):
             # If the model is not recognized by tiktoken, use o200k_base encoding (GPT-4o compatible)
             logger.log(LogLevel.WARNING, f"Model '{selected_model}' not recognized by tiktoken. Using o200k_base encoding as fallback.", source_file="context_allocator.py")
             tokenizer = tiktoken.get_encoding("o200k_base")
+
+        # The assistant/developer role text is sent with every request, so it eats
+        # into the per-request budget just like the record and context do. Subtract
+        # it, then apply the safety fraction to absorb the estimator's undercount of
+        # the assembled prompt. The result is the usable budget chunks are sized to.
+        try:
+            role_text = str(selected_job['Assistant_Role'].values[0] or '')
+            role_tokens = len(tokenizer.encode(role_text))
+        except Exception:
+            role_tokens = 0
+        available_context = int((available_context - role_tokens) * CONTEXT_SAFETY_FRACTION)
+        if available_context <= 0:
+            logger.log(LogLevel.ERROR,
+                       "Available context after role + safety margin is <= 0; increase the "
+                       "model's context window or reduce overhead/role size.",
+                       source_file="context_allocator.py")
+            return {}
 
         # Calculate total question context tokens (we'll send ALL of this with each record)
         question_context_tokens = 0

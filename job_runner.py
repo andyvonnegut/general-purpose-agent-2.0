@@ -222,8 +222,12 @@ def create_job_from_prompt(prompt, record_paths, model=None,
         model=model or schema_generator.DEFAULT_MODEL,
     )
 
+    # Honor the operator's explicit model choice for the run/sizing; only fall
+    # back to the generator's suggestion when no model was requested. (The
+    # suggested model can have a very different context window than the chosen
+    # one, which would otherwise size validation against the wrong limit.)
     job_params = schema_generator.default_job_params(
-        definition.get('suggested_model'), pricing_df
+        model or definition.get('suggested_model'), pricing_df
     )
 
     qctx_basenames = [os.path.basename(p) for p in question_context_paths]

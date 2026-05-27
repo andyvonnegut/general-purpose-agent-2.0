@@ -245,12 +245,24 @@ async def process_batches(
             async with semaphore:
                 if shutdown_requested:
                     return None
-                completion = await client.beta.chat.completions.parse(
-                    model=model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    response_format=response_format,
-                )
+                try:
+                    completion = await client.beta.chat.completions.parse(
+                        model=model_name,
+                        messages=messages,
+                        temperature=temperature,
+                        response_format=response_format,
+                    )
+                except Exception as e:
+                    # Record an error transcript so this per-record failure is
+                    # visible via get_transcripts — otherwise an all-failed run
+                    # surfaces no explanation at all. Re-raise so the caller's
+                    # failure accounting (failed += 1) is unchanged.
+                    logger.log_api_call_complete(
+                        request_data, {"error": str(e)},
+                        {"input_tokens": 0, "output_tokens": 0,
+                         "input": 0, "output": 0, "total": 0},
+                        batch_id=batch_id, status='error')
+                    raise
 
             cost_info = build_cost_info(completion)
             async with state_lock:
