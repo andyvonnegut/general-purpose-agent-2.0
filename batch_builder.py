@@ -209,12 +209,18 @@ def create_response_format(dataframes_dict, selected_job_name):
             }
         }
 
-        # Return the formatted JSON schema
+        # Return the formatted JSON schema. strict=True turns OpenAI's structured
+        # outputs from a hint into a compiled constrained grammar, so the model
+        # is forced to emit {"results": [...]} at the root instead of echoing the
+        # schema shape (observed on gpt-5.5: {"properties": {"results": [...]}}).
+        # The current schema already meets strict's requirements
+        # (additionalProperties: False everywhere, every property in required).
         response_format = {
             "type": "json_schema",
             "json_schema": {
                 "name": selected_job_name,
                 "description": tool_description,
+                "strict": True,
                 "schema": {
                     "type": "object",
                     "properties": {

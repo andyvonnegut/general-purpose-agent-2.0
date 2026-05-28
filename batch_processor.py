@@ -305,7 +305,14 @@ async def process_batches(
             choice = completion.choices[0].message.content
             try:
                 response_data = json.loads(choice)
-                results = response_data.get('results', [])
+                results = response_data.get('results')
+                # Defense in depth for non-strict / future models that echo
+                # the JSON Schema outer shape and bury the value under the
+                # schema's "properties" keyword — observed on gpt-5.5 before
+                # strict mode landed: {"properties": {"results": [...]}}.
+                if not results and isinstance(response_data.get('properties'), dict):
+                    results = response_data['properties'].get('results')
+                results = results or []
             except (json.JSONDecodeError, TypeError):
                 logger.log(LogLevel.ERROR,
                            f"Failed to parse response for batch {batch_id} ({status_label}). "
