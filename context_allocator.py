@@ -20,6 +20,55 @@ SCAFFOLD_MARGIN = 1500
 # than overflowing at request time. Lower = safer but more (costlier) chunks.
 CONTEXT_SAFETY_FRACTION = 0.85
 
+# Columns/keys that carry pipeline metadata, not data, and must be excluded from
+# any per-row JSON emitted to the model.
+_META_COLS = {'source_file', 'json', 'token_count'}
+
+
+def _is_blank(v):
+    """True for None, NaN, and whitespace-only strings — values that contribute
+    no information to the model and only inflate token cost."""
+    if v is None:
+        return True
+    try:
+        if isinstance(v, float) and math.isnan(v):
+            return True
+    except Exception:
+        pass
+    if isinstance(v, str) and v.strip() == '':
+        return True
+    return False
+
+
+def _densify_question_context(df):
+    """Drop columns whose non-null values are all equal (<=1 distinct non-null
+    value) — they cannot discriminate between rows in the reference list, so
+    they only inflate per-record token cost. Idempotent; ignores already-
+    injected metadata columns. Returns (pruned_df, n_dropped, n_kept_data).
+    """
+    keep, drop = [], []
+    for c in df.columns:
+        if c in _META_COLS:
+            keep.append(c)
+            continue
+        col = df[c]
+        nb = col[col.apply(lambda v: not _is_blank(v))]
+        if len(nb) == 0 or nb.nunique(dropna=True) <= 1:
+            drop.append(c)
+        else:
+            keep.append(c)
+    pruned = df[keep].copy()
+    return pruned, len(drop), len([c for c in keep if c not in _META_COLS])
+
+
+def _dense_row_json(row, tokenizer):
+    """Per-row JSON omitting blank keys, plus its token count (matching the
+    existing +len(encode(',')) convention so chunk-packing math is unchanged)."""
+    d = {k: v for k, v in row.items()
+         if k not in _META_COLS and not _is_blank(v)}
+    s = json.dumps(d, default=str)
+    return s, len(tokenizer.encode(s)) + len(tokenizer.encode(','))
+
 def allocate_context(dataframes_dict, selected_job_name):
     """
     Version 2.0: Validates that a single record + all question context fits within token limits.
@@ -110,19 +159,44 @@ def allocate_context(dataframes_dict, selected_job_name):
             if df.empty:
                 continue
 
-            # Convert each row to JSON and calculate token count
+            # Question context only: drop "effectively constant" columns and
+            # build per-row JSON omitting blank fields. Reference rows whose
+            # non-null values are all equal can't help the model discriminate,
+            # so they only inflate per-record cost. Records and the question
+            # schema stay on the original to_json() path.
+            is_question_ctx = df_name.startswith('Question_Context_')
+            if is_question_ctx:
+                pre_cols = len([c for c in df.columns if c not in _META_COLS])
+                pre_tokens = sum(
+                    len(tokenizer.encode(row.to_json())) + len(tokenizer.encode(','))
+                    for _, row in df.iterrows()
+                )
+                df, n_dropped, n_kept = _densify_question_context(df)
+                dataframes_dict[df_name] = df  # downstream readers see pruned df
+
             json_strings = []
             token_counts = []
-
             for _, row in df.iterrows():
-                json_str = row.to_json()
-                token_count = len(tokenizer.encode(json_str)) + len(tokenizer.encode(','))
+                if is_question_ctx:
+                    json_str, token_count = _dense_row_json(row, tokenizer)
+                else:
+                    json_str = row.to_json()
+                    token_count = len(tokenizer.encode(json_str)) + len(tokenizer.encode(','))
                 json_strings.append(json_str)
                 token_counts.append(token_count)
 
             # Add new columns to the dataframe
             df['json'] = json_strings
             df['token_count'] = token_counts
+
+            if is_question_ctx:
+                post_tokens = int(sum(token_counts))
+                pct = (100.0 * (pre_tokens - post_tokens) / pre_tokens) if pre_tokens else 0.0
+                msg = (f"Densified {df_name}: dropped {n_dropped} / {pre_cols} "
+                       f"columns (effectively constant); per-record context tokens "
+                       f"{pre_tokens:,} -> {post_tokens:,} ({pct:.1f}% smaller).")
+                logger.log(LogLevel.INFO, msg, source_file="context_allocator.py")
+                print(msg)
 
             # Sum up all question context tokens (we send ALL of these with each record)
             if df_name.startswith('Question_Context_') or df_name.startswith('GPA_Questions'):

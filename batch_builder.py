@@ -82,9 +82,16 @@ def build_batches(dataframes_dict, selected_job_name, allocation=None):
         all_question_token_counts = []
         for df_name, df in dataframes_dict.items():
             if df_name.startswith('Question_Context_') and not df.empty:
-                # Filter out metadata columns (source_file, json, token_count)
-                question_cols = [col for col in df.columns if col not in ['source_file', 'json', 'token_count']]
-                question_records = df[question_cols].to_dict('records')
+                # Reuse the dense per-row JSON allocator already wrote — this
+                # guarantees what we ship matches what was measured (and is
+                # already null-elided). Fall back to to_dict('records') for
+                # the edge case where allocator hasn't run yet (e.g. tests).
+                if 'json' in df.columns:
+                    question_records = [json.loads(j) for j in df['json'].tolist()]
+                else:
+                    question_cols = [col for col in df.columns
+                                     if col not in ('source_file', 'json', 'token_count')]
+                    question_records = df[question_cols].to_dict('records')
                 all_question_context.extend(question_records)
                 if 'token_count' in df.columns:
                     all_question_token_counts.extend(df['token_count'].tolist())
