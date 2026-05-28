@@ -210,7 +210,12 @@ async def process_batches(
             ]
             if question_context and len(question_context) > 0:
                 messages.append({"role": "developer", "content": "Here is information you can use to help create your response:"})
-                messages.append({"role": "developer", "content": json.dumps(question_context)})
+                # default=str so native Excel-typed cells (datetime, Timestamp,
+                # Decimal, etc.) serialize as their readable str() form instead
+                # of raising — pandas keeps these as native types when the
+                # context source is .xlsx, and stdlib json has no encoder for
+                # them. Mirrors observability.record_run's pattern.
+                messages.append({"role": "developer", "content": json.dumps(question_context, default=str)})
             return messages
 
         def build_reduce_messages(system_content, record_json_str, partial_answers):
@@ -227,7 +232,9 @@ async def process_batches(
                     "required schema: union any matches (e.g. combine multiple matching IDs), drop "
                     "non-matches such as 'No Match' whenever a real match exists, and reconcile any "
                     "conflicts into the single best answer.")},
-                {"role": "developer", "content": json.dumps(partial_answers)},
+                # default=str for the same reason as build_messages — defense
+                # in depth, in case any partial answer contains a non-JSON type.
+                {"role": "developer", "content": json.dumps(partial_answers, default=str)},
             ]
 
         def deterministic_union(partial_answers):
