@@ -201,21 +201,28 @@ async def process_batches(
             }
 
         def build_messages(system_content, record_json_str, question_context):
-            """Single-request message scaffolding: a record plus (optionally) a
-            slice of question context. Identical to the 2.0 layout."""
+            """Single-request message scaffolding. Order matters: every message
+            before the record's JSON is identical across calls in a run, so it
+            forms a stable prefix that OpenAI's automatic prompt caching can
+            deduplicate and bill at the cached rate (~10x cheaper on gpt-5.x).
+            Putting the unique record last is what makes the cacheable prefix
+            exceed the 1024-token activation threshold for caching to engage."""
             messages = [
                 {"role": "developer", "content": system_content},
-                {"role": "user", "content": "Here is the record I want reviewed. Provide a detailed response."},
-                {"role": "user", "content": f"[{record_json_str}]"},
             ]
             if question_context and len(question_context) > 0:
-                messages.append({"role": "developer", "content": "Here is information you can use to help create your response:"})
+                messages.append({"role": "developer",
+                                 "content": "Here is information you can use to help create your response:"})
                 # default=str so native Excel-typed cells (datetime, Timestamp,
                 # Decimal, etc.) serialize as their readable str() form instead
                 # of raising — pandas keeps these as native types when the
                 # context source is .xlsx, and stdlib json has no encoder for
                 # them. Mirrors observability.record_run's pattern.
-                messages.append({"role": "developer", "content": json.dumps(question_context, default=str)})
+                messages.append({"role": "developer",
+                                 "content": json.dumps(question_context, default=str)})
+            messages.append({"role": "user",
+                             "content": "Here is the record I want reviewed. Provide a detailed response."})
+            messages.append({"role": "user", "content": f"[{record_json_str}]"})
             return messages
 
         def build_reduce_messages(system_content, record_json_str, partial_answers):
