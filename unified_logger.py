@@ -47,6 +47,11 @@ class UnifiedLogger:
         self.api_calls_csv = os.path.join(self.api_calls_dir, "api_calls.csv")
         self.costs_csv = os.path.join(self.costs_dir, "costs.csv")
 
+        # Files for which we've already reconciled headers this process. The
+        # check rewrites the file once if the on-disk header drifted from the
+        # current code (e.g. after a new column was added).
+        self._headers_verified: set[str] = set()
+
     def log(self, level, message, source_file=None, function_name=None, to_file=True):
         """Log a message with the specified level."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -150,14 +155,59 @@ class UnifiedLogger:
             cost_str = f"API Cost - Input: ${cost_details['input']:.6f}, Output: ${cost_details['output']:.6f}, Total: ${cost_details['total']:.6f}"
         self.log(LogLevel.INFO, cost_str)
 
+    def _migrate_csv_headers(self, filepath, headers):
+        """If filepath exists but its first-row header differs from the current
+        `headers`, rewrite the file with the new header (preserving every old
+        row; values for new columns become blank). One-shot per (process, file)
+        to keep append-mode CSV writes consistent when a new column is added.
+        """
+        if filepath in self._headers_verified:
+            return
+        if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+            self._headers_verified.add(filepath)
+            return
+        try:
+            with open(filepath, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                try:
+                    existing = next(reader)
+                except StopIteration:
+                    self._headers_verified.add(filepath)
+                    return
+                if existing == list(headers):
+                    self._headers_verified.add(filepath)
+                    return
+                # Header drifted — rewrite with the new headers, padding old
+                # rows for any added columns.
+                rows = list(csv.DictReader(f, fieldnames=existing))
+            tmp = filepath + '.migrating'
+            with open(tmp, 'w', newline='', encoding='utf-8') as out:
+                writer = csv.DictWriter(out, fieldnames=headers, extrasaction='ignore')
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({h: row.get(h, '') for h in headers})
+            os.replace(tmp, filepath)
+        except Exception as e:
+            # Migration failure is non-fatal — fall back to appending under
+            # the new headers (which will leave a slight header-vs-row drift
+            # in the file, but logging keeps working).
+            print(f"Warning: CSV header migration failed for {filepath}: {e}",
+                  file=sys.stderr)
+        finally:
+            self._headers_verified.add(filepath)
+
     def _append_to_csv(self, filepath, row_dict, headers):
         """Thread-safe append to CSV file."""
         try:
+            # Make sure the existing file (if any) carries the current headers,
+            # so newly-appended rows align with the columns at the top.
+            self._migrate_csv_headers(filepath, headers)
+
             # Check if file exists
             file_exists = os.path.exists(filepath)
 
             with open(filepath, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
+                writer = csv.DictWriter(f, fieldnames=headers, extrasaction='ignore')
 
                 # Write header if file is new or empty
                 if not file_exists or os.path.getsize(filepath) == 0:
@@ -190,8 +240,8 @@ class UnifiedLogger:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         headers = ['timestamp', 'session_id', 'job_name', 'model', 'temperature', 'batch_id',
-                   'request_json', 'response_json', 'input_tokens', 'output_tokens',
-                   'input_cost', 'output_cost', 'total_cost', 'status']
+                   'request_json', 'response_json', 'input_tokens', 'cached_input_tokens',
+                   'output_tokens', 'input_cost', 'output_cost', 'total_cost', 'status']
 
         row = {
             'timestamp': timestamp,
@@ -203,6 +253,7 @@ class UnifiedLogger:
             'request_json': json.dumps(request_data),
             'response_json': json.dumps(response_data) if response_data else '',
             'input_tokens': cost_info.get('input_tokens', 0),
+            'cached_input_tokens': cost_info.get('cached_input_tokens', 0),
             'output_tokens': cost_info.get('output_tokens', 0),
             'input_cost': cost_info.get('input', 'unknown'),
             'output_cost': cost_info.get('output', 'unknown'),
@@ -219,14 +270,15 @@ class UnifiedLogger:
         """Log cost summary to costs.csv."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        headers = ['timestamp', 'job_name', 'model', 'input_tokens', 'output_tokens',
-                   'input_cost', 'output_cost', 'total_cost']
+        headers = ['timestamp', 'job_name', 'model', 'input_tokens', 'cached_input_tokens',
+                   'output_tokens', 'input_cost', 'output_cost', 'total_cost']
 
         row = {
             'timestamp': timestamp,
             'job_name': self.job_name or 'general',
             'model': cost_info.get('model', ''),
             'input_tokens': cost_info.get('input_tokens', 0),
+            'cached_input_tokens': cost_info.get('cached_input_tokens', 0),
             'output_tokens': cost_info.get('output_tokens', 0),
             'input_cost': cost_info.get('input', 'unknown'),
             'output_cost': cost_info.get('output', 'unknown'),

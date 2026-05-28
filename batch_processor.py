@@ -151,6 +151,7 @@ async def process_batches(
             'in_flight': 0,
             'total_cost': 0.0,
             'total_input_tokens': 0,
+            'total_cached_input_tokens': 0,
             'total_output_tokens': 0,
             'csv_file_initialized': False
         }
@@ -158,13 +159,34 @@ async def process_batches(
 
         def build_cost_info(completion):
             """Tokens + cost for a completion (model-priced), or zeros if usage
-            is unavailable. Shape matches unified_logger.log_api_call_complete."""
+            is unavailable. Shape matches unified_logger.log_api_call_complete.
+
+            Splits input into fresh vs cached so the cost matches what OpenAI
+            actually bills: prompts >= 1024 tokens get automatic prompt caching
+            and the cached portion is billed at Cached_Input_Cost_Per_Million
+            from API_Pricing.csv (e.g. gpt-5.4 cached $0.25/M vs full $2.50/M).
+            Falls back to the full rate for models that don't list a cached rate.
+            """
             usage = getattr(completion, 'usage', None) if completion is not None else None
             in_tok = getattr(usage, 'prompt_tokens', 0) or 0
             out_tok = getattr(usage, 'completion_tokens', 0) or 0
+            details = getattr(usage, 'prompt_tokens_details', None) if usage else None
+            cached_in_tok = getattr(details, 'cached_tokens', 0) or 0
+            # Defensive: some response shapes report cached > prompt; clamp so
+            # fresh stays non-negative.
+            cached_in_tok = min(cached_in_tok, in_tok)
+            fresh_in_tok = in_tok - cached_in_tok
             pr = pricing_df[pricing_df['Model'] == model_name]
             if not pr.empty:
-                in_cost = (in_tok / 1_000_000) * float(pr.iloc[0]['Input_Cost_Per_Million'])
+                full_rate = float(pr.iloc[0]['Input_Cost_Per_Million'])
+                cached_raw = pr.iloc[0].get('Cached_Input_Cost_Per_Million')
+                cached_rate = (
+                    float(cached_raw)
+                    if cached_raw not in (None, '') and pd.notna(cached_raw)
+                    else full_rate
+                )
+                in_cost = (fresh_in_tok / 1_000_000) * full_rate \
+                        + (cached_in_tok / 1_000_000) * cached_rate
                 out_cost = (out_tok / 1_000_000) * float(pr.iloc[0]['Output_Cost_Per_Million'])
             else:
                 in_cost = out_cost = 0.0
@@ -172,6 +194,7 @@ async def process_batches(
                 'model': model_name,
                 'input_tokens': in_tok,
                 'output_tokens': out_tok,
+                'cached_input_tokens': cached_in_tok,
                 'input': in_cost,
                 'output': out_cost,
                 'total': in_cost + out_cost,
@@ -260,6 +283,7 @@ async def process_batches(
                     logger.log_api_call_complete(
                         request_data, {"error": str(e)},
                         {"input_tokens": 0, "output_tokens": 0,
+                         "cached_input_tokens": 0,
                          "input": 0, "output": 0, "total": 0},
                         batch_id=batch_id, status='error')
                     raise
@@ -268,6 +292,7 @@ async def process_batches(
             async with state_lock:
                 state['total_cost'] += cost_info['total']
                 state['total_input_tokens'] += cost_info['input_tokens']
+                state['total_cached_input_tokens'] += cost_info.get('cached_input_tokens', 0)
                 state['total_output_tokens'] += cost_info['output_tokens']
 
             choice = completion.choices[0].message.content
@@ -413,8 +438,12 @@ async def process_batches(
         print(f"Failed: {state['failed']}")
         print(f"Duration: {duration:.2f} seconds")
         print(f"Average time per record: {duration/max(state['completed'], 1):.2f} seconds")
+        cached_in = state['total_cached_input_tokens']
+        total_in = state['total_input_tokens']
+        cache_ratio = (cached_in / total_in) if total_in else 0.0
         print(f"\nCost Summary:")
-        print(f"  Input tokens: {state['total_input_tokens']:,}")
+        print(f"  Input tokens: {total_in:,}  (cached: {cached_in:,}, "
+              f"{cache_ratio:.0%} hit rate)")
         print(f"  Output tokens: {state['total_output_tokens']:,}")
         print(f"  Total cost: ${state['total_cost']:.4f}")
         print(f"\nResults saved to: {output_file}")
@@ -430,6 +459,7 @@ async def process_batches(
             'failed': state['failed'],
             'duration_seconds': round(duration, 2),
             'input_tokens': state['total_input_tokens'],
+            'cached_input_tokens': state['total_cached_input_tokens'],
             'output_tokens': state['total_output_tokens'],
             'total_cost': round(state['total_cost'], 4),
         }

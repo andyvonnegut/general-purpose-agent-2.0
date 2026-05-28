@@ -159,6 +159,9 @@ def get_transcripts(job_name=None, session_id=None, batch_id=None, status=None,
                 'model': r.get('model'),
                 'temperature': r.get('temperature'),
                 'input_tokens': r.get('input_tokens'),
+                # Present on rows written after the cached-pricing change; missing
+                # (None) on older rows from before — readers must handle null.
+                'cached_input_tokens': r.get('cached_input_tokens'),
                 'output_tokens': r.get('output_tokens'),
                 'total_cost': r.get('total_cost'),
                 'status': r.get('status'),
