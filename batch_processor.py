@@ -436,15 +436,31 @@ async def process_batches(
                         state['completed'] += 1
                     state['in_flight'] -= 1
 
-        # Create tasks for all batches
+        # Warm OpenAI's automatic prompt cache by running the first batch
+        # sequentially. Cache entries are populated by *completed* calls — if
+        # we fan all batches out at once, none of them benefits because none
+        # has finished yet. Awaiting one call first means its stable prefix
+        # (system + question context) is cached, so every parallel batch
+        # that follows bills that prefix at the cached rate (~10x cheaper on
+        # gpt-5.x) instead of all racing to populate an empty cache. Cost of
+        # warming is ~one extra request's worth of latency; pays off
+        # whenever the run has more than ~2 records.
+        rows_iter = batches_df.iterrows()
+        first = next(rows_iter, None)
+        if first is not None and not shutdown_requested:
+            _, first_row = first
+            await process_single_batch(first_row)
+
+        # Now fan out the remaining batches in parallel under the existing
+        # max_parallel_requests semaphore.
         tasks = []
-        for idx, row in batches_df.iterrows():
+        for idx, row in rows_iter:
             if shutdown_requested:
                 break
             task = asyncio.create_task(process_single_batch(row))
             tasks.append(task)
 
-        # Wait for all tasks to complete
+        # Wait for all parallel tasks to complete
         await asyncio.gather(*tasks, return_exceptions=True)
 
         # Final summary
