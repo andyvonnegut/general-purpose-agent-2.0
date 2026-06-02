@@ -165,6 +165,7 @@ def run_job(
     max_parallel_requests: int = 50,
     question_context_paths: Optional[List[str]] = None,
     max_records: Optional[int] = None,
+    context_batch_size: int = 0,
 ) -> dict:
     """Run an existing named job over the dropped data file(s), record by record.
 
@@ -179,6 +180,10 @@ def run_job(
         question_context_paths: Optional path(s) to example/context or enum
             reference files attached to every record.
         max_records: If set, process only the first N records (used for previews).
+        context_batch_size: Max question-context rows per LLM call. 1 = pairwise
+            (one reference row at a time), N = at most N rows/call, 0 = all
+            context at once (default). When a record spans >1 chunk the per-chunk
+            answers are consolidated. The token-window limit still applies on top.
 
     Returns the absolute results_path plus a summary: total_records, succeeded,
     failed, input_tokens, output_tokens, total_cost, duration_seconds.
@@ -192,7 +197,8 @@ def run_job(
                 clean=True,
             )
             summary = job_runner.run_job_sync(
-                job_name, max_parallel_requests=max_parallel_requests, max_records=max_records)
+                job_name, max_parallel_requests=max_parallel_requests,
+                max_records=max_records, context_batch_size=context_batch_size)
         summary["status"] = "completed"
         return summary
     except Exception as e:
@@ -207,6 +213,7 @@ def generate_and_run(
     max_parallel_requests: int = 50,
     question_context_paths: Optional[List[str]] = None,
     max_records: Optional[int] = None,
+    context_batch_size: int = 0,
 ) -> dict:
     """End-to-end: from dropped file(s) + a prompt, generate and persist a job
     schema, then run it over the same file(s) and return the results path.
@@ -233,7 +240,7 @@ def generate_and_run(
             )
             summary = job_runner.run_job_sync(
                 created["job_name"], max_parallel_requests=max_parallel_requests,
-                max_records=max_records,
+                max_records=max_records, context_batch_size=context_batch_size,
             )
         result = {**created, **summary, "status": "completed"}
         return result

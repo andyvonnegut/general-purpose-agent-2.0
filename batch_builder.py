@@ -2,26 +2,38 @@ import json
 import pandas as pd
 from unified_logger import get_logger, LogLevel
 
-def _pack_chunks(question_records, token_counts, budget):
-    """Greedily pack question-context rows into chunks whose token sums stay at
-    or under `budget`. Returns a list of chunks (each a list of record dicts).
+def _pack_chunks(question_records, token_counts, budget, max_rows=0):
+    """Greedily pack question-context rows into chunks. A chunk is closed when
+    adding the next row would exceed the token `budget`, OR when `max_rows` is
+    set and the chunk already holds `max_rows` rows. Returns a list of chunks
+    (each a list of record dicts).
+
+    `max_rows` is the caller's "context batch size": 1 -> one reference row per
+    chunk (pairwise), N -> at most N rows per chunk, 0/None -> no row-count cap
+    (today's behaviour). The two limits compose: the effective chunk is the
+    smaller of the row cap and what the token budget allows.
 
     When `budget` is falsy or token counts are unavailable, the whole context is
-    returned as a single chunk (today's behaviour). A row larger than the budget
-    is placed in its own chunk rather than dropped (the allocator already
-    guarantees a single row fits, this is just defensive).
+    one chunk UNLESS `max_rows` is set, in which case we still split by row
+    count. A row larger than the budget is placed in its own chunk rather than
+    dropped (the allocator already guarantees a single row fits; this is just
+    defensive).
     """
     if not question_records:
         # One empty chunk -> the single-request, no-context path downstream.
         return [[]]
-    if not budget or any(tc is None for tc in token_counts):
+    max_rows = int(max_rows or 0)
+    have_budget = bool(budget) and not any(tc is None for tc in token_counts)
+    if not have_budget and max_rows <= 0:
         return [list(question_records)]
 
     chunks = []
     current, current_tokens = [], 0
     for rec, tokens in zip(question_records, token_counts):
-        tokens = int(tokens)
-        if current and current_tokens + tokens > budget:
+        tokens = int(tokens) if tokens is not None else 0
+        over_budget = have_budget and current and current_tokens + tokens > budget
+        over_rows = max_rows > 0 and len(current) >= max_rows
+        if over_budget or over_rows:
             chunks.append(current)
             current, current_tokens = [], 0
         current.append(rec)
@@ -31,7 +43,7 @@ def _pack_chunks(question_records, token_counts, budget):
     return chunks
 
 
-def build_batches(dataframes_dict, selected_job_name, allocation=None):
+def build_batches(dataframes_dict, selected_job_name, allocation=None, max_rows_per_chunk=0):
     """
     Version 2.1: Builds one batch per individual record. Each batch carries the
     question context as a list of chunks. When the full question context fits a
@@ -102,7 +114,9 @@ def build_batches(dataframes_dict, selected_job_name, allocation=None):
         # single request (unchanged 2.0 behaviour); more than one means it will be
         # split across requests and stitched.
         budget = (allocation or {}).get('Context_Budget_Per_Chunk')
-        question_context_chunks = _pack_chunks(all_question_context, all_question_token_counts, budget)
+        question_context_chunks = _pack_chunks(
+            all_question_context, all_question_token_counts, budget,
+            max_rows=max_rows_per_chunk)
 
         # Create response format (same for all batches since the schema is fixed)
         response_format = create_response_format(dataframes_dict, selected_job_name)
