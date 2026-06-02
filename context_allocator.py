@@ -24,6 +24,39 @@ CONTEXT_SAFETY_FRACTION = 0.85
 # any per-row JSON emitted to the model.
 _META_COLS = {'source_file', 'json', 'token_count'}
 
+# Per-message framing overhead (role + delimiters) the chat format adds on top of
+# the raw content tokens. ~4 tokens/message is the long-standing OpenAI estimate;
+# counting it keeps token estimates biased slightly high, which is the safe side
+# for rate limiting.
+_PER_MESSAGE_OVERHEAD = 4
+
+
+def _encoder_for(model):
+    """tiktoken encoder for ``model``, falling back to o200k_base (GPT-4o family)
+    for models tiktoken doesn't recognize. Mirrors allocate_context's resolution."""
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("o200k_base")
+
+
+def count_message_tokens(messages, model, encoder=None):
+    """Estimate the input tokens of an assembled chat ``messages`` list.
+
+    Sums each message's content tokens plus a small per-message framing overhead.
+    Used by the rate limiter to charge the TPM bucket; deliberately a slight
+    over-count (the assembled request runs ~15-17% larger than the sum of parts,
+    per CONTEXT_SAFETY_FRACTION) so we err toward staying under the limit. Pass a
+    prebuilt ``encoder`` to avoid re-resolving it per call."""
+    enc = encoder or _encoder_for(model)
+    total = 0
+    for msg in messages or []:
+        content = msg.get('content', '') if isinstance(msg, dict) else ''
+        if not isinstance(content, str):
+            content = str(content)
+        total += len(enc.encode(content)) + _PER_MESSAGE_OVERHEAD
+    return total
+
 
 def _is_blank(v):
     """True for None, NaN, and whitespace-only strings — values that contribute

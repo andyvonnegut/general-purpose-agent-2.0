@@ -5,11 +5,31 @@ import json
 import asyncio
 import signal
 from datetime import datetime
-from openai import AsyncOpenAI
+import httpx
+from openai import AsyncOpenAI, APITimeoutError, RateLimitError
+from openai import DefaultAsyncHttpxClient
 from unified_logger import LogLevel, get_logger
+import settings
+from rate_limiter import AsyncRateLimiter
+from context_allocator import count_message_tokens, _encoder_for
 
 # Global shutdown flag
 shutdown_requested = False
+
+
+def _status_for_exception(exc):
+    """Map an OpenAI SDK exception to an api_calls.csv status, so a 429 from
+    hitting the per-minute cap is distinguishable from billing exhaustion and
+    from timeouts when reading transcripts/logs after a run."""
+    if isinstance(exc, APITimeoutError):
+        return 'timeout'
+    if isinstance(exc, RateLimitError):
+        code = getattr(exc, 'code', None)
+        blob = f"{code or ''} {exc}".lower()
+        if 'insufficient_quota' in blob or 'exceeded your current quota' in blob:
+            return 'insufficient_quota'
+        return 'rate_limit_exceeded'
+    return 'error'
 
 def sanitize_csv_value(value):
     """Normalize string values so CSV imports do not break on embedded control characters."""
@@ -88,6 +108,13 @@ async def process_batches(
         temperature_raw = job_config.iloc[0].get('Temperature', 1)
         temperature = float(temperature_raw) if temperature_raw is not None else 1.0
 
+        # Reserved output tokens per call — OpenAI's TPM accounting counts input
+        # plus the reserved max output, so the rate limiter charges this too.
+        try:
+            output_reserve = int(job_config.iloc[0]['Output_Context_Limit'])
+        except (KeyError, ValueError, TypeError):
+            output_reserve = 0
+
         # Load API pricing configuration
         pricing_df = dataframes_dict.get('API_Pricing')
         if pricing_df is None:
@@ -118,8 +145,38 @@ async def process_batches(
                       source_file="batch_processor.py", function_name="process_batches")
             return {}
 
-        # Create async OpenAI client
-        client = AsyncOpenAI(api_key=my_api_key)
+        # Clamp the requested concurrency to a hard ceiling BEFORE building the
+        # client, so the HTTP connection pool can be sized to it. This is the real
+        # protection against an accidental huge max_parallel (the CLI permits up to
+        # 1000): the binding constraint on a single machine is local sockets/DNS,
+        # not OpenAI's per-minute limits, and a few hundred simultaneous connections
+        # overwhelm the resolver (APIConnectionError / getaddrinfo failures).
+        effective_parallel = min(max_parallel_requests, settings.MAX_CONCURRENCY_CEILING)
+        if effective_parallel < max_parallel_requests:
+            logger.log(LogLevel.WARNING,
+                       f"Requested max_parallel_requests={max_parallel_requests} clamped "
+                       f"to ceiling {effective_parallel} (GPA_MAX_CONCURRENCY).",
+                       source_file="batch_processor.py")
+            print(f"NOTE: max parallel {max_parallel_requests} clamped to {effective_parallel}.")
+
+        # Create async OpenAI client.
+        # - max_retries/timeout give the SDK's built-in exponential backoff (which
+        #   honors Retry-After) as the final net for any residual 429.
+        # - The httpx connection pool is sized to the effective concurrency and uses
+        #   keep-alive so connections are reused instead of re-resolved/re-opened on
+        #   every call — this stops the DNS storm that the prior unbounded default
+        #   pool caused under high concurrency.
+        pool_limits = httpx.Limits(
+            max_connections=effective_parallel,
+            max_keepalive_connections=effective_parallel,
+            keepalive_expiry=30.0,
+        )
+        client = AsyncOpenAI(
+            api_key=my_api_key,
+            max_retries=settings.OPENAI_MAX_RETRIES,
+            timeout=settings.OPENAI_TIMEOUT_SECONDS,
+            http_client=DefaultAsyncHttpxClient(limits=pool_limits),
+        )
 
         # Prepare output file
         output_file = f"Results/{selected_job_name}_results.csv"
@@ -135,14 +192,28 @@ async def process_batches(
         failed_count = 0
         start_time = datetime.now()
 
+        # Proactive rate limiter: paces dispatch to the model's RPM/TPM so a burst
+        # can never exceed OpenAI's per-minute limits. Seeded from fallback limits;
+        # the first response's x-ratelimit-* headers refine it before the fan-out.
+        seed_rpm, seed_tpm = settings.fallback_limits(model_name)
+        rate_limiter = AsyncRateLimiter(
+            seed_rpm, seed_tpm,
+            utilization=settings.RATE_LIMIT_TARGET_UTILIZATION,
+            burst_seconds=settings.BURST_WINDOW_SECONDS,
+            logger=logger, source="fallback",
+        )
+        token_encoder = _encoder_for(model_name)
+
         print(f"\nStarting parallel processing of {total_batches} records...")
-        print(f"Maximum concurrent requests: {max_parallel_requests}")
+        print(f"Maximum concurrent requests: {effective_parallel}")
+        print(f"Rate limit (seed): {seed_rpm} RPM / {seed_tpm} TPM "
+              f"@ {settings.RATE_LIMIT_TARGET_UTILIZATION:.0%}")
         print(f"Model: {model_name}")
         print(f"Temperature: {temperature}")
         print("=" * 80)
 
         # Create semaphore to limit concurrent requests
-        semaphore = asyncio.Semaphore(max_parallel_requests)
+        semaphore = asyncio.Semaphore(effective_parallel)
 
         # Shared state for tracking
         state = {
@@ -279,28 +350,44 @@ async def process_batches(
                 "messages": messages,
             }
 
+            # Pace dispatch against the model's RPM/TPM BEFORE taking a semaphore
+            # slot, so time spent waiting on the rate limiter doesn't hold a slot.
+            estimated_tokens = count_message_tokens(messages, model_name, token_encoder) + output_reserve
+            await rate_limiter.acquire(estimated_tokens)
+
             async with semaphore:
                 if shutdown_requested:
                     return None
                 try:
-                    completion = await client.beta.chat.completions.parse(
+                    # with_raw_response exposes the x-ratelimit-* headers so the
+                    # limiter can lock onto this account's real per-model limits
+                    # (and back off if the per-minute budget is exhausted).
+                    raw = await client.beta.chat.completions.with_raw_response.parse(
                         model=model_name,
                         messages=messages,
                         temperature=temperature,
                         response_format=response_format,
                     )
+                    completion = raw.parse()
                 except Exception as e:
                     # Record an error transcript so this per-record failure is
                     # visible via get_transcripts — otherwise an all-failed run
-                    # surfaces no explanation at all. Re-raise so the caller's
+                    # surfaces no explanation at all. Classify the status so 429
+                    # subtypes are distinguishable. Re-raise so the caller's
                     # failure accounting (failed += 1) is unchanged.
                     logger.log_api_call_complete(
                         request_data, {"error": str(e)},
                         {"input_tokens": 0, "output_tokens": 0,
                          "cached_input_tokens": 0,
                          "input": 0, "output": 0, "total": 0},
-                        batch_id=batch_id, status='error')
+                        batch_id=batch_id, status=_status_for_exception(e))
                     raise
+
+            # Lock the limiter onto the account's live limits / remaining budget.
+            try:
+                rate_limiter.reconcile(getattr(raw, 'headers', None))
+            except Exception:
+                pass
 
             cost_info = build_cost_info(completion)
             async with state_lock:
@@ -483,6 +570,11 @@ async def process_batches(
               f"{cache_ratio:.0%} hit rate)")
         print(f"  Output tokens: {state['total_output_tokens']:,}")
         print(f"  Total cost: ${state['total_cost']:.4f}")
+        limiter_stats = rate_limiter.stats()
+        print(f"\nRate limiting: limits from {limiter_stats['limiter_source']} "
+              f"({limiter_stats['rpm']} RPM / {limiter_stats['tpm']} TPM); "
+              f"throttled {limiter_stats['throttle_count']} times, "
+              f"{limiter_stats['throttle_wait_seconds']}s total wait.")
         print(f"\nResults saved to: {output_file}")
         print("=" * 80)
 
@@ -499,6 +591,7 @@ async def process_batches(
             'cached_input_tokens': state['total_cached_input_tokens'],
             'output_tokens': state['total_output_tokens'],
             'total_cost': round(state['total_cost'], 4),
+            **limiter_stats,
         }
 
     except Exception as e:

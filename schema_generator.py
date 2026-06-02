@@ -18,6 +18,7 @@ import json
 import pandas as pd
 from openai import OpenAI
 
+import settings
 from errors import SchemaGenerationError
 
 CONFIG_DIR = 'Configuration_Files'
@@ -248,7 +249,11 @@ def generate_job_definition(prompt, file_samples, existing_job_names,
               max_length,enum_source_hint}, ... ]} with job_name sanitized to
     be unique and keys cleaned/de-duplicated.
     """
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(
+        api_key=api_key,
+        max_retries=settings.OPENAI_MAX_RETRIES,
+        timeout=settings.OPENAI_TIMEOUT_SECONDS,
+    )
     user_payload = {
         "task_prompt": prompt,
         "input_files": file_samples,
